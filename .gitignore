@@ -1,0 +1,66 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.eggs/
+build/
+dist/
+wheels/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Test and tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.hypothesis/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local environment and secrets
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+*secret*
+*token*
+claude_desktop_config.json
+
+# Runtime/local config
+.m32-bridge/
+config.local.yaml
+config.*.local.yaml
+
+# Logs and audit runtime output
+*.log
+logs/
+audit/*.jsonl
+*.jsonl
+
+# Temporary files
+tmp/
+temp/
+.cache/
+
+# MCP/package artifacts
+*.dxt
+*.mcpb

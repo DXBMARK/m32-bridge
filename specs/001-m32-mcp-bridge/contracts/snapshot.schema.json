@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.m32-mcp-bridge/contracts/snapshot.schema.json",
+  "title": "M32 MCP Bridge Snapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "snapshot_id",
+    "captured_at",
+    "identity",
+    "firmware",
+    "checksum",
+    "complete",
+    "environment_label",
+    "state_values",
+    "missing_paths",
+    "critical_stale_paths"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "snapshot_id": {
+      "type": "string",
+      "pattern": "^snap_[A-Za-z0-9_-]{8,64}$"
+    },
+    "captured_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_kind", "model", "hardware_verified"],
+      "properties": {
+        "target_kind": {
+          "type": "string",
+          "enum": ["hardware", "fake_m32", "external_emulator"]
+        },
+        "model": {
+          "type": "string"
+        },
+        "hardware_verified": {
+          "type": "boolean"
+        }
+      }
+    },
+    "firmware": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "status"],
+      "properties": {
+        "version": {
+          "type": ["string", "null"]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["known", "unknown", "unsupported"]
+        }
+      }
+    },
+    "checksum": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "complete": {
+      "type": "boolean"
+    },
+    "environment_label": {
+      "type": "string",
+      "enum": ["emulator", "hardware-unverified", "hardware-verified"]
+    },
+    "state_values": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/state_value"
+      }
+    },
+    "missing_paths": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^/"
+      }
+    },
+    "critical_stale_paths": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^/"
+      }
+    }
+  },
+  "$defs": {
+    "state_value": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "raw_value",
+        "native_value",
+        "display_value",
+        "unit",
+        "revision",
+        "observed_at",
+        "fresh_until",
+        "source",
+        "support_status",
+        "environment_label"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "raw_value": {
+          "$ref": "#/$defs/value"
+        },
+        "native_value": {
+          "$ref": "#/$defs/value"
+        },
+        "display_value": {
+          "type": "string"
+        },
+        "unit": {
+          "type": ["string", "null"]
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "fresh_until": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "source": {
+          "type": "string",
+          "enum": ["console", "fake_m32", "external_emulator", "snapshot"]
+        },
+        "support_status": {
+          "type": "string",
+          "enum": ["supported", "unsupported", "unknown", "partial"]
+        },
+        "environment_label": {
+          "type": "string",
+          "enum": ["emulator", "hardware-unverified", "hardware-verified"]
+        }
+      }
+    },
+    "value": {
+      "type": ["number", "integer", "string", "boolean", "null", "object"],
+      "additionalProperties": true
+    }
+  }
+}

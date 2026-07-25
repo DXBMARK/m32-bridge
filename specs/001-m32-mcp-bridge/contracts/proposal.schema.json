@@ -1,0 +1,249 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.m32-mcp-bridge/contracts/proposal.schema.json",
+  "title": "M32 MCP Bridge Proposal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "proposal_id",
+    "proposal_digest",
+    "created_at",
+    "expires_at",
+    "created_by",
+    "runtime_mode_at_creation",
+    "base_snapshot_id",
+    "base_revisions",
+    "operations",
+    "risk_summary",
+    "status",
+    "human_readable_summary",
+    "server_computed"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "proposal_id": {
+      "type": "string",
+      "pattern": "^prop_[A-Za-z0-9_-]{8,64}$"
+    },
+    "proposal_digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "created_by": {
+      "type": "string",
+      "enum": ["claude_desktop", "chatgpt", "cli_operator"]
+    },
+    "runtime_mode_at_creation": {
+      "type": "string",
+      "enum": ["OBSERVE", "SOUNDCHECK", "LIVE"]
+    },
+    "base_snapshot_id": {
+      "type": "string",
+      "pattern": "^snap_[A-Za-z0-9_-]{8,64}$"
+    },
+    "base_revisions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "revision"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "pattern": "^/"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/operation"
+      }
+    },
+    "risk_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_risk", "contains_r3", "contains_r4", "affects_main", "computed_by"],
+      "properties": {
+        "max_risk": {
+          "type": "string",
+          "enum": ["R1", "R2", "R3"]
+        },
+        "contains_r3": {
+          "type": "boolean"
+        },
+        "contains_r4": {
+          "type": "boolean",
+          "const": false
+        },
+        "affects_main": {
+          "type": "boolean"
+        },
+        "computed_by": {
+          "type": "string",
+          "const": "bridge_server"
+        }
+      }
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "DRAFTED",
+        "PENDING_APPROVAL",
+        "APPROVED_BY_HOST",
+        "EXECUTING",
+        "VERIFIED",
+        "EXPIRED",
+        "CONFLICTED",
+        "POLICY_DENIED",
+        "READBACK_FAILED",
+        "ROLLED_BACK",
+        "ROLLBACK_FAILED",
+        "CANCELLED_BY_EMERGENCY",
+        "USED"
+      ]
+    },
+    "human_readable_summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000
+    },
+    "server_computed": {
+      "type": "boolean",
+      "const": true
+    }
+  },
+  "$defs": {
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation_id",
+        "semantic_action",
+        "target_path",
+        "target_kind",
+        "risk_class",
+        "before_value",
+        "requested_value",
+        "rollback_value",
+        "bounds",
+        "requires_readback",
+        "affects_main",
+        "reason"
+      ],
+      "properties": {
+        "operation_id": {
+          "type": "string",
+          "pattern": "^op_[A-Za-z0-9_-]{8,64}$"
+        },
+        "semantic_action": {
+          "type": "string",
+          "enum": [
+            "label_set",
+            "fader_set",
+            "mute_set",
+            "send_level_set",
+            "eq_adjust",
+            "dynamics_adjust",
+            "talkback_momentary",
+            "talkback_configure",
+            "headamp_set",
+            "routing_set",
+            "recall_scene",
+            "bulk_update"
+          ]
+        },
+        "target_path": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "target_kind": {
+          "type": "string",
+          "enum": ["channel", "bus", "matrix", "main", "routing", "headamp", "talkback", "scene", "other"]
+        },
+        "risk_class": {
+          "type": "string",
+          "enum": ["R1", "R2", "R3"]
+        },
+        "before_value": {
+          "$ref": "#/$defs/value"
+        },
+        "requested_value": {
+          "$ref": "#/$defs/value"
+        },
+        "rollback_value": {
+          "$ref": "#/$defs/value"
+        },
+        "bounds": {
+          "$ref": "#/$defs/bounds"
+        },
+        "requires_readback": {
+          "type": "boolean",
+          "const": true
+        },
+        "affects_main": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        }
+      }
+    },
+    "bounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit", "min", "max", "grid", "max_delta"],
+      "properties": {
+        "unit": {
+          "type": ["string", "null"],
+          "maxLength": 32
+        },
+        "min": {
+          "type": ["number", "integer", "null"]
+        },
+        "max": {
+          "type": ["number", "integer", "null"]
+        },
+        "grid": {
+          "type": ["number", "integer", "null"],
+          "exclusiveMinimum": 0
+        },
+        "max_delta": {
+          "type": ["number", "integer", "null"],
+          "minimum": 0
+        },
+        "live_max_delta_db": {
+          "type": ["number", "integer", "null"],
+          "maximum": 3,
+          "minimum": 0
+        }
+      }
+    },
+    "value": {
+      "type": ["number", "integer", "string", "boolean", "null", "object"],
+      "additionalProperties": true
+    }
+  }
+}

@@ -1,0 +1,50 @@
+schema_version: "1.0.0"
+target:
+  kind: fake_m32
+  osc_host: "127.0.0.1"
+  osc_port: 10023
+  expected_model: "M32"
+runtime:
+  default_mode: OBSERVE
+  write_locked_on_startup: true
+policy:
+  require_human_approval: true
+  approval_source: mcp_host_confirmation
+  allow_always_allow: false
+  r3_soundcheck_only: true
+  r4_blocked: true
+  main_protected_by_default: true
+  allow_sample_rate_change: false
+  allow_clock_change: false
+  allow_auto_phantom: false
+  protected_paths:
+    - /main/st
+    - /main/m
+state:
+  read_fresh_ms: 2000
+  write_fresh_ms: 1000
+  xremote_renewal_seconds: 8
+  xremote_fail_safe: write_lock_on_missed_renewal
+event_profile:
+  profile_id: example-local
+  measurement_microphone:
+    defined: false
+    channel: null
+    role: null
+    phantom_policy: manual_only
+  rta_source: null
+transports:
+  stdio:
+    enabled: true
+  streamable_http:
+    enabled: false
+    bind_host: "127.0.0.1"
+    port: null
+    secure_tunnel_only: true
+    auth_token_env: null
+audit:
+  jsonl_path: ".local/audit/m32-bridge.audit.jsonl"
+  redaction_version: "1"
+snapshots:
+  directory: ".local/snapshots"
+

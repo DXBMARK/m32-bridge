@@ -1,0 +1,257 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.m32-mcp-bridge/contracts/audit.schema.json",
+  "title": "M32 MCP Bridge Audit Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "audit_id",
+    "timestamp",
+    "actor_host",
+    "tool_name",
+    "runtime_mode",
+    "connection_lifecycle",
+    "verification_state",
+    "console_identity",
+    "approval",
+    "policy_decision",
+    "result",
+    "operation_count",
+    "operations",
+    "redaction_version"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "audit_id": {
+      "type": "string",
+      "pattern": "^audit_[A-Za-z0-9_-]{8,64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "actor_host": {
+      "type": "string",
+      "enum": ["claude_desktop", "chatgpt", "cli_operator", "system"]
+    },
+    "tool_name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "runtime_mode": {
+      "type": "string",
+      "enum": ["OBSERVE", "SOUNDCHECK", "LIVE", "EMERGENCY"]
+    },
+    "connection_lifecycle": {
+      "type": "string",
+      "enum": ["DISCONNECTED", "CONNECTING", "IDENTIFYING", "SYNCING", "READY", "DEGRADED", "WRITE_LOCKED", "EMERGENCY_LOCKED"]
+    },
+    "verification_state": {
+      "type": "string",
+      "enum": ["EMULATOR", "HARDWARE_UNVERIFIED", "HARDWARE_VERIFIED"]
+    },
+    "console_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_kind", "model", "firmware_status", "hardware_verified"],
+      "properties": {
+        "target_kind": {
+          "type": "string",
+          "enum": ["hardware", "fake_m32", "external_emulator", "unknown"]
+        },
+        "model": {
+          "type": "string"
+        },
+        "firmware_status": {
+          "type": "string",
+          "enum": ["known", "unknown", "unsupported"]
+        },
+        "hardware_verified": {
+          "type": "boolean"
+        }
+      }
+    },
+    "proposal_id": {
+      "type": ["string", "null"],
+      "pattern": "^prop_[A-Za-z0-9_-]{8,64}$"
+    },
+    "proposal_digest": {
+      "type": ["string", "null"],
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "transaction_id": {
+      "type": ["string", "null"],
+      "pattern": "^txn_[A-Za-z0-9_-]{8,64}$"
+    },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required", "source", "reference"],
+      "properties": {
+        "required": {
+          "type": "boolean"
+        },
+        "source": {
+          "type": "string",
+          "enum": ["none", "mcp_host_confirmation", "operator_control"]
+        },
+        "reference": {
+          "type": ["string", "null"],
+          "maxLength": 256
+        }
+      }
+    },
+    "policy_decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowed", "risk_class", "reasons"],
+      "properties": {
+        "allowed": {
+          "type": "boolean"
+        },
+        "risk_class": {
+          "type": "string",
+          "enum": ["R0", "R1", "R2", "R3", "R4"]
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "result": {
+      "type": "string",
+      "enum": ["allowed", "denied", "executed", "verified", "failed", "rolled_back", "rollback_failed", "cancelled"]
+    },
+    "operation_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 64
+    },
+    "operations": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/audit_operation"
+      }
+    },
+    "error_code": {
+      "$ref": "#/$defs/error_code"
+    },
+    "redaction_version": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "result": {
+            "enum": ["denied", "executed", "failed", "rolled_back", "rollback_failed"]
+          }
+        },
+        "required": ["result"]
+      },
+      "then": {
+        "properties": {
+          "operations": {
+            "minItems": 1
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "audit_operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation_id",
+        "semantic_action",
+        "path",
+        "old_value",
+        "requested_value",
+        "readback_value",
+        "rollback_value",
+        "status",
+        "latency_ms"
+      ],
+      "properties": {
+        "operation_id": {
+          "type": "string",
+          "pattern": "^op_[A-Za-z0-9_-]{8,64}$"
+        },
+        "semantic_action": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "old_value": {
+          "$ref": "#/$defs/value"
+        },
+        "requested_value": {
+          "$ref": "#/$defs/value"
+        },
+        "readback_value": {
+          "$ref": "#/$defs/value"
+        },
+        "rollback_value": {
+          "$ref": "#/$defs/value"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["not_attempted", "denied", "written", "readback_matched", "readback_mismatch", "rolled_back", "rollback_failed"]
+        },
+        "latency_ms": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "error_code": {
+          "$ref": "#/$defs/error_code"
+        }
+      }
+    },
+    "error_code": {
+      "type": ["string", "null"],
+      "enum": [
+        "NOT_CONNECTED",
+        "STALE_STATE",
+        "PARTIAL_SNAPSHOT",
+        "UNKNOWN_FIRMWARE",
+        "IDENTITY_MISMATCH",
+        "CAPABILITY_MISMATCH",
+        "UNSUPPORTED_PATH",
+        "POLICY_DENIED",
+        "R4_BLOCKED",
+        "R3_MODE_DENIED",
+        "MAIN_PROTECTED",
+        "CONFIRMATION_REQUIRED",
+        "PROPOSAL_EXPIRED",
+        "PROPOSAL_CONFLICT",
+        "READBACK_MISMATCH",
+        "ROLLBACK_FAILED",
+        "EMERGENCY_LOCKED",
+        "HARDWARE_UNVERIFIED",
+        "VALIDATION_ERROR",
+        "TIMEOUT",
+        "MALFORMED_REPLY",
+        "RTA_SOURCE_UNKNOWN",
+        null
+      ]
+    },
+    "value": {
+      "type": ["number", "integer", "string", "boolean", "null", "object"],
+      "additionalProperties": true
+    }
+  }
+}

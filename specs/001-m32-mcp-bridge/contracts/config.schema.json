@@ -1,0 +1,309 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.m32-mcp-bridge/contracts/config.schema.json",
+  "title": "M32 MCP Bridge Configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "target",
+    "runtime",
+    "policy",
+    "state",
+    "event_profile",
+    "transports",
+    "audit",
+    "snapshots"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "osc_host", "osc_port"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["hardware", "fake_m32", "external_emulator"]
+        },
+        "osc_host": {
+          "type": "string",
+          "minLength": 1
+        },
+        "osc_port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 10023
+        },
+        "expected_model": {
+          "type": "string",
+          "enum": ["M32", "M32 LIVE", "X32", "unknown"]
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["default_mode", "write_locked_on_startup"],
+      "properties": {
+        "default_mode": {
+          "type": "string",
+          "enum": ["OBSERVE", "SOUNDCHECK", "LIVE"]
+        },
+        "write_locked_on_startup": {
+          "type": "boolean",
+          "const": true
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "require_human_approval",
+        "approval_source",
+        "allow_always_allow",
+        "r3_soundcheck_only",
+        "r4_blocked",
+        "main_protected_by_default",
+        "allow_sample_rate_change",
+        "allow_clock_change",
+        "allow_auto_phantom"
+      ],
+      "properties": {
+        "require_human_approval": {
+          "type": "boolean",
+          "const": true
+        },
+        "approval_source": {
+          "type": "string",
+          "const": "mcp_host_confirmation"
+        },
+        "allow_always_allow": {
+          "type": "boolean",
+          "const": false
+        },
+        "r3_soundcheck_only": {
+          "type": "boolean",
+          "const": true
+        },
+        "r4_blocked": {
+          "type": "boolean",
+          "const": true
+        },
+        "main_protected_by_default": {
+          "type": "boolean",
+          "const": true
+        },
+        "allow_sample_rate_change": {
+          "type": "boolean",
+          "const": false
+        },
+        "allow_clock_change": {
+          "type": "boolean",
+          "const": false
+        },
+        "allow_auto_phantom": {
+          "type": "boolean",
+          "const": false
+        },
+        "protected_paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["read_fresh_ms", "write_fresh_ms", "xremote_renewal_seconds", "xremote_fail_safe"],
+      "properties": {
+        "read_fresh_ms": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 60000
+        },
+        "write_fresh_ms": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 10000
+        },
+        "xremote_renewal_seconds": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 9,
+          "default": 8
+        },
+        "xremote_fail_safe": {
+          "type": "string",
+          "const": "write_lock_on_missed_renewal"
+        }
+      }
+    },
+    "event_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile_id", "measurement_microphone"],
+      "properties": {
+        "profile_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "measurement_microphone": {
+          "$ref": "#/$defs/measurement_microphone"
+        },
+        "rta_source": {
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "transports": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stdio", "streamable_http"],
+      "properties": {
+        "stdio": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled"],
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "const": true
+            }
+          }
+        },
+        "streamable_http": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "bind_host", "secure_tunnel_only"],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "bind_host": {
+              "type": "string",
+              "enum": ["127.0.0.1", "::1"]
+            },
+            "port": {
+              "type": ["integer", "null"],
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "secure_tunnel_only": {
+              "type": "boolean",
+              "const": true
+            },
+            "auth_token_env": {
+              "type": ["string", "null"],
+              "pattern": "^[A-Z][A-Z0-9_]*$"
+            }
+          }
+        }
+      }
+    },
+    "audit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonl_path", "redaction_version"],
+      "properties": {
+        "jsonl_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "redaction_version": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "snapshots": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["directory"],
+      "properties": {
+        "directory": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  },
+  "$defs": {
+    "measurement_microphone": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["defined", "channel", "role", "phantom_policy"],
+      "properties": {
+        "defined": {
+          "type": "boolean"
+        },
+        "channel": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 40
+        },
+        "role": {
+          "type": ["string", "null"],
+          "enum": ["measurement_microphone", null]
+        },
+        "phantom_policy": {
+          "type": "string",
+          "enum": ["manual_only", "forbidden"]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "defined": {
+                "const": true
+              }
+            },
+            "required": ["defined"]
+          },
+          "then": {
+            "properties": {
+              "channel": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 40
+              },
+              "role": {
+                "const": "measurement_microphone"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "defined": {
+                "const": false
+              }
+            },
+            "required": ["defined"]
+          },
+          "then": {
+            "properties": {
+              "channel": {
+                "type": "null"
+              },
+              "role": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

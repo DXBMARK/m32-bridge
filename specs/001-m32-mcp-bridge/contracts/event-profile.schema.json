@@ -1,0 +1,237 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.m32-mcp-bridge/contracts/event-profile.schema.json",
+  "title": "M32 MCP Bridge Event Profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_profile_id",
+    "name",
+    "created_at",
+    "channel_dictionary",
+    "bus_dictionary",
+    "output_dictionary",
+    "expected_topology",
+    "measurement_microphone",
+    "protected_paths",
+    "mode_permissions",
+    "known_good_reference"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "event_profile_id": {
+      "type": "string",
+      "pattern": "^event_[A-Za-z0-9_-]{8,64}$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "channel_dictionary": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/role_entry"
+      }
+    },
+    "bus_dictionary": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/role_entry"
+      }
+    },
+    "output_dictionary": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/role_entry"
+      }
+    },
+    "expected_topology": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["main_paths", "aes50_required", "expansion_card_required"],
+      "properties": {
+        "main_paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["LR", "M", "C"]
+          },
+          "uniqueItems": true
+        },
+        "aes50_required": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["A", "B"]
+          },
+          "uniqueItems": true
+        },
+        "expansion_card_required": {
+          "type": "boolean"
+        }
+      }
+    },
+    "measurement_microphone": {
+      "$ref": "#/$defs/measurement_microphone"
+    },
+    "protected_paths": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^/"
+      },
+      "uniqueItems": true
+    },
+    "mode_permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["OBSERVE", "SOUNDCHECK", "LIVE", "EMERGENCY"],
+      "properties": {
+        "OBSERVE": {
+          "$ref": "#/$defs/mode_permission"
+        },
+        "SOUNDCHECK": {
+          "$ref": "#/$defs/mode_permission"
+        },
+        "LIVE": {
+          "$ref": "#/$defs/mode_permission"
+        },
+        "EMERGENCY": {
+          "$ref": "#/$defs/mode_permission"
+        }
+      }
+    },
+    "known_good_reference": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["snapshot_id", "checksum"],
+      "properties": {
+        "snapshot_id": {
+          "type": "string",
+          "pattern": "^snap_[A-Za-z0-9_-]{8,64}$"
+        },
+        "checksum": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "role_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "role", "label", "phantom_policy", "protected"],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        },
+        "role": {
+          "type": "string",
+          "minLength": 1
+        },
+        "label": {
+          "type": "string"
+        },
+        "phantom_policy": {
+          "type": "string",
+          "enum": ["manual_only", "forbidden", "not_applicable"]
+        },
+        "protected": {
+          "type": "boolean"
+        }
+      }
+    },
+    "measurement_microphone": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["defined", "channel", "role", "phantom_policy"],
+      "properties": {
+        "defined": {
+          "type": "boolean"
+        },
+        "channel": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 40
+        },
+        "role": {
+          "type": ["string", "null"],
+          "enum": ["measurement_microphone", null]
+        },
+        "phantom_policy": {
+          "type": "string",
+          "enum": ["manual_only", "forbidden"]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "defined": {
+                "const": true
+              }
+            },
+            "required": ["defined"]
+          },
+          "then": {
+            "properties": {
+              "channel": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 40
+              },
+              "role": {
+                "const": "measurement_microphone"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "defined": {
+                "const": false
+              }
+            },
+            "required": ["defined"]
+          },
+          "then": {
+            "properties": {
+              "channel": {
+                "type": "null"
+              },
+              "role": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "mode_permission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_risk", "writes_allowed"],
+      "properties": {
+        "max_risk": {
+          "type": "string",
+          "enum": ["R0", "R1", "R2", "R3"]
+        },
+        "writes_allowed": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

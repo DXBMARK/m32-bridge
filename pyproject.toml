@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "m32-mcp-bridge"
+version = "0.1.0"
+description = "Local safety-first MCP bridge for Midas M32/X32-family OSC control."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = { text = "Proprietary" }
+authors = [
+  { name = "M32 MCP Bridge maintainers" }
+]
+dependencies = [
+  "jsonschema>=4.23,<5",
+  "mcp>=1.0,<2",
+  "pyyaml>=6.0,<7"
+]
+
+[project.optional-dependencies]
+test = [
+  "hypothesis>=6.100,<7",
+  "pytest>=8.0,<9",
+  "pytest-asyncio>=0.23,<2"
+]
+
+[project.scripts]
+m32-bridge = "m32_bridge.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/m32_bridge"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "unit: fast unit tests for contracts, policy, codec, models, audit, and state",
+  "property: property-based tests for codecs, value grids, revisions, and proposal digests",
+  "fake_m32: integration tests against the project-owned deterministic Fake M32",
+  "external_emulator: opt-in tests against the Patrick-Gilles Maillot X32 Emulator",
+  "mcp: MCP Inspector, protocol, and Claude Desktop host-level tests",
+  "cross_platform: Windows and macOS smoke, packaging, and startup tests",
+  "hardware_acceptance: final physical M32 acceptance tests only"
+]
+
