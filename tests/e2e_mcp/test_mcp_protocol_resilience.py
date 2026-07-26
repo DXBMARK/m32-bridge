@@ -92,7 +92,7 @@ def test_stdout_stderr_protocol_isolation_for_cli_health():
     assert payload["structured"] is True
 
 
-def test_cli_without_command_keeps_usage_error_behavior():
+def test_cli_without_command_returns_non_tty_shell_guard():
     completed = subprocess.run(
         [sys.executable, "-m", "m32_bridge"],
         check=False,
@@ -101,8 +101,11 @@ def test_cli_without_command_keeps_usage_error_behavior():
     )
 
     assert completed.returncode != 0
-    assert completed.stdout == ""
-    assert "usage:" in completed.stderr
+    assert completed.stderr == ""
+    payload = json.loads(completed.stdout)
+    assert payload["error_code"] == "NON_INTERACTIVE_SHELL_REQUIRED"
+    assert payload["osc_writes_sent"] == 0
+    assert "m32-bridge setup" in payload["recommendations"]
 
 
 def test_mcp_server_subcommand_starts_without_usage_or_json_diagnostics():

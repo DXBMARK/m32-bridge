@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import socket
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Any, Mapping
 
 import yaml
 
+from m32_bridge.config.runtime import resolve_runtime_config
 from m32_bridge.osc.codec import pack_message, unpack_message
 
 DEFAULT_CONFIG_PATH = "config.example.yaml"
@@ -28,10 +30,11 @@ def runtime_diagnostics(
     target = _runtime_target(env, host=host, port=port)
     probe = _probe_info(target["host"], target["port"], timeout=timeout)
     status = "ok" if probe["udp_info_probe_result"] == "CONNECTED" else "not_connected"
+    missing_host = probe["exception_type"] == "ConnectionConfigMissing"
     result: dict[str, Any] = {
         "control": "doctor-runtime",
         "status": status,
-        "error_code": None if status == "ok" else "NOT_CONNECTED",
+        "error_code": None if status == "ok" else "NO_CONSOLE_HOST" if missing_host else "NOT_CONNECTED",
         "connection_lifecycle": "connected" if status == "ok" else "not_connected",
         "structured": True,
         "process_pid": os.getpid(),
@@ -81,12 +84,107 @@ def console_status_not_connected_diagnostics(
     }
 
 
+def setup_info_probe(host: str | None, port: int | None, *, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
+    return _probe_info(host, port, timeout=timeout)
+
+
+def mcp_startup_diagnostics(
+    *,
+    command: str,
+    args: list[str],
+    timeout_s: float = DEFAULT_TIMEOUT_SECONDS,
+    environ: Mapping[str, str] | None = None,
+    cwd: Path | None = None,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    process: subprocess.Popen[str] | None = None
+    base: dict[str, Any] = {
+        "transport": "stdio",
+        "command": command,
+        "args": args,
+        "stdout_protocol_clean": True,
+        "logs_to_stderr": True,
+        "opens_network_port": False,
+        "osc_writes_sent": 0,
+        "hardware_verified": False,
+        "production_live_ready": False,
+    }
+    try:
+        child_env = None
+        if environ is not None:
+            child_env = os.environ.copy()
+            child_env.update(environ)
+        process = subprocess.Popen(
+            [command, *args],
+            cwd=cwd,
+            env=child_env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        return {
+            "ok": False,
+            "status": "LAUNCHER_NOT_FOUND",
+            "error_code": "LAUNCHER_NOT_FOUND",
+            "latency_ms": _elapsed_ms(started),
+            "exception_type": type(exc).__name__,
+            **base,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "MCP_STARTUP_FAILED",
+            "error_code": "MCP_STARTUP_FAILED",
+            "latency_ms": _elapsed_ms(started),
+            "exception_type": type(exc).__name__,
+            **base,
+        }
+
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        try:
+            stdout, stderr = process.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate(timeout=2)
+        return {
+            "ok": False,
+            "status": "MCP_STARTUP_TIMEOUT",
+            "error_code": "MCP_STARTUP_TIMEOUT",
+            "latency_ms": _elapsed_ms(started),
+            "exception_type": "TimeoutExpired",
+            "stdout_preview": stdout[:200],
+            "stderr_preview": stderr[:200],
+            **base,
+        }
+
+    ok = process.returncode == 0
+    return {
+        "ok": ok,
+        "status": "MCP_STARTED" if ok else "MCP_STARTUP_FAILED",
+        "error_code": None if ok else "MCP_STARTUP_FAILED",
+        "latency_ms": _elapsed_ms(started),
+        "exception_type": None if ok else "ProcessExited",
+        "returncode": process.returncode,
+        "stdout_preview": stdout[:200],
+        "stderr_preview": stderr[:200],
+        **base,
+    }
+
+
 def _runtime_target(env: Mapping[str, str], *, host: str | None, port: int | None) -> dict[str, Any]:
-    config = _load_runtime_config(env)
-    target_config = config.get("target", {}) if isinstance(config.get("target"), dict) else {}
-    configured_host = host or env.get("M32_CONSOLE_HOST") or _string_or_none(target_config.get("osc_host"))
-    configured_port = port if port is not None else _int_or_none(env.get("M32_CONSOLE_PORT") or target_config.get("osc_port"))
-    return {"host": configured_host, "port": configured_port}
+    config_path = Path(env.get("M32_CONFIG", DEFAULT_CONFIG_PATH))
+    resolved = resolve_runtime_config(
+        cli_args={"host": host, "port": port},
+        environ=env,
+        user_config_path=config_path,
+        allow_project_local=False,
+    )
+    return {"host": resolved.effective_host, "port": resolved.effective_port}
 
 
 def _probe_info(host: str | None, port: int | None, *, timeout: float) -> dict[str, Any]:
