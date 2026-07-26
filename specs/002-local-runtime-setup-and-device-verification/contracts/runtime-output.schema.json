@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://m32-bridge.local/contracts/runtime-output.schema.json",
+  "title": "M32 Bridge Runtime Output",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "ok",
+    "status",
+    "osc_writes_sent",
+    "hardware_verified",
+    "production_live_ready"
+  ],
+  "properties": {
+    "ok": {
+      "type": "boolean"
+    },
+    "status": {
+      "type": "string"
+    },
+    "error_code": {
+      "type": ["string", "null"]
+    },
+    "message": {
+      "type": ["string", "null"]
+    },
+    "configured_host": {
+      "type": ["string", "null"]
+    },
+    "configured_port": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "attempted_path": {
+      "type": ["string", "null"],
+      "pattern": "^/.*"
+    },
+    "latency_ms": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "exception_type": {
+      "type": ["string", "null"]
+    },
+    "response_address": {
+      "type": ["string", "array", "object", "null"]
+    },
+    "connected": {
+      "type": ["boolean", "null"]
+    },
+    "classification": {
+      "type": ["string", "null"],
+      "enum": [
+        "NOT_CONFIGURED",
+        "EMULATOR_CONNECTED",
+        "CONNECTED_UNVERIFIED",
+        "HARDWARE_CANDIDATE",
+        "HARDWARE_VERIFIED",
+        null
+      ]
+    },
+    "osc_writes_sent": {
+      "type": "integer",
+      "const": 0
+    },
+    "hardware_verified": {
+      "type": "boolean",
+      "default": false
+    },
+    "production_live_ready": {
+      "type": "boolean",
+      "default": false
+    },
+    "unsupported_or_timeout_paths": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "status"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "pattern": "^/"
+          },
+          "status": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "exception_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "data": {
+      "type": "object"
+    },
+    "recommendations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}
