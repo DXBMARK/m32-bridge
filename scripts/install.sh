@@ -3,7 +3,6 @@ set -eu
 
 # M32 Bridge POSIX user-local installer surface.
 # Official targets: macOS, Linux, WSL, Raspberry Pi OS.
-# Official quick command: curl -fsSL <raw-url>/scripts/install.sh | sh
 # Safer path: download, inspect, then run locally.
 # Download options: curl first when available, wget fallback, or manual download fallback.
 # GitHub raw bootstrap: when this script is run without repo files beside it,
@@ -12,7 +11,7 @@ set -eu
 # No binary installers, ports, or background daemon.
 # Structured output includes admin_required=false, hardware_verified=false,
 # production_live_ready=false, and osc_writes_sent=0.
-# First-run TTY wizard is future work: DXBMARK style in TTY, non-TTY plain and JSON fallback.
+# TTY installer wizard uses DXBMARK style; non-TTY stays plain and JSON stays machine-readable.
 # Post-install checks: m32-bridge health, m32-bridge setup, m32-bridge get-info,
 # m32-bridge detect-device, m32-bridge doctor-runtime.
 # MCP guidance is manual-copy only: use m32-bridge mcp-server as a local stdio
@@ -29,9 +28,15 @@ JSON_OUTPUT=0
 PLATFORM=""
 TARGET_VERSION="0.1.0"
 DEFAULT_SOURCE_REF="main"
+# Keep these values in parity with src/m32_bridge/installer/runtime_manager.py.
+APPROVED_PYTHON_MINOR="3.13"
+PROJECT_PYTHON_RANGE=">=3.11,<3.14"
+UV_INSTALL_URL_POSIX="https://astral.sh/uv/install.sh"
 DEFAULT_SOURCE_URL="https://github.com/DXBMARK/m32-bridge/archive/refs/heads/main.tar.gz"
 SOURCE_URL="${M32_INSTALL_SOURCE_URL:-${DEFAULT_SOURCE_URL}}"
 SOURCE_REF="${M32_INSTALL_SOURCE_REF:-}"
+USER_CACHE_HOME="${XDG_CACHE_HOME:-${HOME}/.cache}"
+DEFAULT_UV_CACHE_DIR="${USER_CACHE_HOME}/uv"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -62,6 +67,9 @@ Default install is user-local:
             m32-bridge get-info
             m32-bridge detect-device
             m32-bridge doctor-runtime
+  managed runtime:
+            CPython 3.13.x installed and launched only through uv
+            project range >=3.11,<3.14; system Python unchanged
   MCP:      m32-bridge mcp-server
   Lifecycle guidance:
             update, repair, uninstall
@@ -75,9 +83,23 @@ Recommended trust workflow:
   5. For lifecycle actions, review user-local app, launcher, and config paths first.
 
 Options:
+  -h, --help        Show this help.
   --dry-run          Print intended status/actions only.
   --json             Emit structured JSON.
   --platform VALUE   macos, linux, wsl, raspberry_pi_os.
+  --target-version VERSION
+
+Installer commands:
+  /status /health /setup /get-info /verify-device /doctor-runtime
+  /contact /clear /exit
+
+Status colours:
+  Green available/success/safe; Yellow action; Red blocker; Slate information.
+
+Contact:
+  Website                   : https://www.dxbmark.com
+  Email                     : support@dxbmark.com
+  Phone / WhatsApp          : +971505121583
 HELP
       exit 0
       ;;
@@ -148,6 +170,304 @@ required_actions_json() {
 JSON
 }
 
+is_tty() {
+  [ -t 0 ] && [ -t 1 ]
+}
+
+ansi_or_plain() {
+  if is_tty; then
+    printf '\033[38;5;208m%s\033[0m\n' "$1"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
+tty_width() {
+  cols="$(tput cols 2>/dev/null || printf 80)"
+  case "${cols}" in
+    ''|*[!0-9]*) printf '%s\n' 80 ;;
+    *) printf '%s\n' "${cols}" ;;
+  esac
+}
+
+paint_tty_lines() {
+  if ! is_tty; then
+    cat
+    return
+  fi
+  width=$(( $(tty_width) - 1 ))
+  if [ "${width}" -lt 20 ]; then
+    width=20
+  fi
+  while IFS= read -r line; do
+    visible_len=${#line}
+    if [ "${visible_len}" -gt "${width}" ]; then
+      line="$(printf '%s' "${line}" | cut -c 1-"${width}")"
+      visible_len=${#line}
+    fi
+    pad=$((width - visible_len))
+    printf '\033[48;2;36;57;71m%s' "${line}"
+    if [ "${pad}" -gt 0 ]; then
+      printf '%*s' "${pad}" ''
+    fi
+    printf '\033[48;2;36;57;71m\n'
+  done
+}
+
+installer_help() {
+  cat <<'HELP'
+/help - show installer sections and safe next commands
+/contact - show DXBMARK support contact
+/status - show installer/runtime/source/safety state
+/clear - redraw the installer screen
+/exit - exit the installer TTY flow
+Dry-run prints the plan without writing app or launcher files.
+JSON mode is for CI and never includes banners or ANSI colours.
+Missing uv requires explicit user-local setup; no global py is required.
+Managed Python is CPython 3.13.x through uv; system Python stays unchanged.
+Website                   : https://www.dxbmark.com
+Email                     : support@dxbmark.com
+Phone / WhatsApp          : +971505121583
+HELP
+}
+
+installer_contact() {
+  cat <<'CONTACT'
+DXBMARK Support
+Website                   : https://www.dxbmark.com
+Email                     : support@dxbmark.com
+Phone / WhatsApp          : +971505121583
+CONTACT
+}
+
+print_missing_uv_tty() {
+  mode="status"
+  if [ "${DRY_RUN}" = "1" ]; then
+    mode="dry-run"
+  fi
+  if is_tty; then
+    printf '\033[48;2;36;57;71m\033[2J\033[H\033[38;2;249;126;26m'
+  fi
+  {
+  cat <<TEXT
+DXBMARK M32 BRIDGE INSTALLER
+#  ______  ______  __  __    _    ____  _  __
+# |  _ \\ \\/ / __ )|  \\/  |  / \\  |  _ \\| |/ / LLC
+# | | | \\  /|  _ \\| |\\/| | / _ \\ | |_) | ' /
+# | |_| /  \\| |_) | |  | |/ ___ \\|  _ <| . \\
+# |____/_/\\_\\____/|_|  |_/_/   \\_\\_| \\_\\_|\\_\\ dxbmark.com
+User-local installer. No admin, no service, no binary package.
+Type / for interactive menu | Type /help for list
+
+System Check
+  OS: ${PLATFORM_VALUE}
+  architecture: $(uname -m 2>/dev/null || printf unknown)
+  shell: ${SHELL:-unknown}
+Download capability
+  Primary tool: $(if command -v curl >/dev/null 2>&1; then printf 'curl available'; elif command -v wget >/dev/null 2>&1; then printf 'wget available'; else printf 'not available'; fi)
+  wget fallback: $(if command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then printf 'optional, not installed'; elif command -v wget >/dev/null 2>&1; then printf available; else printf 'optional, not installed'; fi)
+  Manual fallback: available
+  uv status: missing
+  Python strategy: CPython 3.13.x managed by uv; system Python unchanged; no global py required
+
+Source Check
+  install_source: ${INSTALL_SOURCE}
+  source_url: ${SOURCE_URL}
+  source_ref: ${SOURCE_REF}
+  Source configuration: configured: github source archive
+  Reachability: not_checked
+
+Install Plan
+  mode: ${mode}
+  status: RUNTIME_SETUP_REQUIRED
+  install_root: ${HOME}/.m32-bridge
+  app_path: ${HOME}/.m32-bridge/app
+  launcher_path: ${HOME}/.local/bin/m32-bridge
+  user_local=true
+  admin_required=false
+
+Safety
+  osc_writes_sent=0
+  hardware_verified=false
+  production_live_ready=false
+  no /set
+  no OSC writes
+  no IDE or MCP client config writes
+
+Required Actions
+  INSTALL_UV_USER_LOCAL: Install uv in user space
+    reason: M32 Bridge uses uv to manage Python runtime dependencies without system Python launcher assumptions.
+    command: download https://astral.sh/uv/install.sh to a temporary file; run only after exact INSTALL confirmation
+    confirmation_required=true
+
+Quick Actions
+  /health          Check runtime and installation readiness
+  /setup           Configure a known console endpoint
+  /get-info        Read information from the configured endpoint
+  /verify-device   Verify the configured endpoint; no network scan
+  /doctor-runtime  Diagnose local runtime issues
+
+Commands
+  /help
+  /contact
+  /status
+  /clear
+  /exit
+TEXT
+  } | paint_tty_lines
+}
+
+handle_missing_uv_tty_input() {
+  if ! is_tty; then
+    return
+  fi
+  if [ "${DRY_RUN}" = "1" ]; then
+    return
+  fi
+  cat <<'SETUP'
+Required Runtime Setup
+
+uv is required to install and run M32 Bridge.
+It will be installed for the current user only.
+No administrator access is required.
+System Python will not be changed.
+
+Options:
+  [1] Install uv user-locally
+  [2] Show manual instructions
+  [3] Exit
+SETUP
+  printf '%s' "Select [1-3]: "
+  IFS= read -r answer || return
+  case "${answer}" in
+    /help|help)
+      installer_help
+      ;;
+    /contact|contact)
+      installer_contact
+      ;;
+    /status|status)
+      printf '%s\n' "installer state: RUNTIME_SETUP_REQUIRED"
+      printf '%s\n' "uv: missing"
+      printf '%s\n' "install source: ${INSTALL_SOURCE}"
+      printf '%s\n' "Source configuration: configured: github source archive"
+      printf '%s\n' "Reachability: not_checked"
+      printf '%s\n' "safety: osc_writes_sent=0, hardware_verified=false, production_live_ready=false"
+      ;;
+    /clear|clear)
+      printf '\033[2J\033[H'
+      print_missing_uv_tty
+      ;;
+    /exit|exit|quit|q)
+      printf '%s\n' "status=RUNTIME_SETUP_REQUIRED"
+      printf '%s\n' "No dependency action was taken."
+      ;;
+    1)
+      bootstrap_uv_tty
+      ;;
+    2)
+      printf '%s\n' "Download ${UV_INSTALL_URL_POSIX}, inspect it, install uv for your user, then run: uv python install ${APPROVED_PYTHON_MINOR}"
+      ;;
+    3)
+      printf '%s\n' "status=RUNTIME_SETUP_REQUIRED"
+      printf '%s\n' "No dependency action was taken."
+      ;;
+    *)
+      printf '%s\n' "status=RUNTIME_SETUP_REQUIRED"
+      printf '%s\n' "No dependency action was taken."
+      ;;
+  esac
+}
+
+bootstrap_uv_tty() {
+  cat <<'CONFIRM'
+Source
+  Official installer URL: https://astral.sh/uv/install.sh
+
+Target
+  User-local uv installation paths
+
+Managed Python
+  CPython 3.13.x
+  Installed and used only through uv
+
+Changes
+  Downloads uv installer to a temporary file
+  Installs uv for the current user
+  Installs approved managed Python if required
+  May provide PATH guidance
+  Does not use administrator elevation
+  Does not change system Python
+  Does not install wget or curl
+
+Type INSTALL to continue.
+CONFIRM
+  IFS= read -r confirmation || return 1
+  if [ "${confirmation}" != "INSTALL" ]; then
+    printf '%s\n' "Exact INSTALL confirmation was not provided. No download or install was performed."
+    return 1
+  fi
+  uv_temp="$(mktemp "${TMPDIR:-/tmp}/m32-uv-installer.XXXXXX")" || return 1
+  trap 'rm -f "${uv_temp}"' 0 HUP INT TERM
+  printf '%s\n' "URL: ${UV_INSTALL_URL_POSIX}"
+  printf '%s\n' "Temporary path: ${uv_temp}"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fLsS "${UV_INSTALL_URL_POSIX}" -o "${uv_temp}" || {
+      printf '%s\n' "uv installer download failed." >&2
+      rm -f "${uv_temp}"
+      trap - 0 HUP INT TERM
+      return 1
+    }
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q -O "${uv_temp}" "${UV_INSTALL_URL_POSIX}" || {
+      printf '%s\n' "uv installer download failed." >&2
+      rm -f "${uv_temp}"
+      trap - 0 HUP INT TERM
+      return 1
+    }
+  else
+    printf '%s\n' "No download tool is available. Use the manual instructions." >&2
+    rm -f "${uv_temp}"
+    trap - 0 HUP INT TERM
+    return 1
+  fi
+  if [ ! -s "${uv_temp}" ]; then
+    printf '%s\n' "Downloaded uv installer is empty." >&2
+    rm -f "${uv_temp}"
+    trap - 0 HUP INT TERM
+    return 1
+  fi
+  /bin/sh "${uv_temp}" || {
+    printf '%s\n' "uv installer execution failed." >&2
+    rm -f "${uv_temp}"
+    trap - 0 HUP INT TERM
+    return 1
+  }
+  rm -f "${uv_temp}"
+  trap - 0 HUP INT TERM
+  UV_BIN="$(command -v uv 2>/dev/null || true)"
+  if [ -z "${UV_BIN}" ] && [ -x "${HOME}/.local/bin/uv" ]; then
+    UV_BIN="${HOME}/.local/bin/uv"
+  fi
+  if [ -z "${UV_BIN}" ]; then
+    printf '%s\n' "uv was installed but could not be rediscovered. Open a new terminal or add the reported user-local path." >&2
+    return 1
+  fi
+  "${UV_BIN}" --version
+  UV_MANAGED_PYTHON=1 "${UV_BIN}" python install "${APPROVED_PYTHON_MINOR}" || {
+    printf '%s\n' "Managed CPython 3.13 installation failed." >&2
+    return 1
+  }
+  managed_python="$(UV_MANAGED_PYTHON=1 "${UV_BIN}" python find --managed-python "${APPROVED_PYTHON_MINOR}" 2>/dev/null || true)"
+  if [ -z "${managed_python}" ] || [ ! -x "${managed_python}" ]; then
+    printf '%s\n' "Managed CPython 3.13 could not be rediscovered." >&2
+    return 1
+  fi
+  "${managed_python}" --version
+  printf '%s\n' "Managed Python path: ${managed_python}"
+  return 0
+}
+
 print_missing_uv_json() {
   APP_PATH="${HOME}/.m32-bridge/app"
   LAUNCHER_PATH="${HOME}/.local/bin/m32-bridge"
@@ -168,6 +488,11 @@ print_missing_uv_json() {
   "uv_detected": false,
   "python_required": true,
   "python_managed_by_uv": true,
+  "approved_python_minor": "${APPROVED_PYTHON_MINOR}",
+  "project_python_range": "${PROJECT_PYTHON_RANGE}",
+  "system_python_modified": false,
+  "global_python_installed": false,
+  "default_python_aliases_installed": false,
   "installer_can_continue": false,
   "confirmation_required": true,
   "uv_status": "manual_action_required",
@@ -218,18 +543,49 @@ fi
 if [ "${JSON_OUTPUT}" = "1" ]; then
   set -- "$@" --json
 fi
+if [ "${JSON_OUTPUT}" != "1" ] && is_tty; then
+  set -- "$@" --tty --color
+fi
 
-if command -v uv >/dev/null 2>&1; then
+UV_BIN="$(command -v uv 2>/dev/null || true)"
+if [ -z "${UV_BIN}" ] && [ "${JSON_OUTPUT}" != "1" ] && [ "${DRY_RUN}" != "1" ] && is_tty; then
+  print_missing_uv_tty
+  if handle_missing_uv_tty_input; then
+    UV_BIN="$(command -v uv 2>/dev/null || true)"
+    if [ -z "${UV_BIN}" ] && [ -x "${HOME}/.local/bin/uv" ]; then
+      UV_BIN="${HOME}/.local/bin/uv"
+    fi
+  fi
+fi
+
+if [ -n "${UV_BIN}" ]; then
   if [ "${INSTALL_SOURCE}" != "local_checkout" ]; then
     if ! download_remote_source; then
       exit 1
     fi
   fi
+  if [ ! -f "${REPO_ROOT}/uv.lock" ]; then
+    echo "uv.lock is required for reproducible frozen runtime execution. Refusing unfrozen install." >&2
+    exit 1
+  fi
   PYTHONPATH_VALUE="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
-  PYTHONPATH="${PYTHONPATH_VALUE}" UV_CACHE_DIR="${UV_CACHE_DIR:-/private/tmp/uv-cache}" uv run "$@"
+  if [ "${M32_INSTALL_ASSUME_UV:-}" = "installed_user_local" ] && [ -x "${REPO_ROOT}/.venv/bin/python" ]; then
+    shift
+    PYTHONPATH="${PYTHONPATH_VALUE}" "${REPO_ROOT}/.venv/bin/python" "$@"
+  else
+    if [ -z "${UV_CACHE_DIR:-}" ]; then
+      mkdir -p "${DEFAULT_UV_CACHE_DIR}"
+      UV_CACHE_DIR="${DEFAULT_UV_CACHE_DIR}"
+      export UV_CACHE_DIR
+    fi
+    PYTHONPATH="${PYTHONPATH_VALUE}" UV_MANAGED_PYTHON=1 \
+      "${UV_BIN}" run --frozen --managed-python --python "${APPROVED_PYTHON_MINOR}" "$@"
+  fi
 else
   if [ "${JSON_OUTPUT}" = "1" ]; then
     print_missing_uv_json
+  elif is_tty && [ "${DRY_RUN}" = "1" ]; then
+    print_missing_uv_tty
   else
     echo "M32 Bridge installer status"
     if [ "${DRY_RUN}" = "1" ]; then
@@ -247,6 +603,9 @@ else
     echo "admin_required=false"
     echo "global_py_required=false"
     echo "global_python_required=false"
+    echo "approved_python_minor=${APPROVED_PYTHON_MINOR}"
+    echo "project_python_range=${PROJECT_PYTHON_RANGE}"
+    echo "system_python_modified=false"
     echo "installer_can_continue=false"
     echo "uv_status=manual_action_required"
     echo "hardware_verified=false"

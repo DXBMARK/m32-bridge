@@ -15,7 +15,7 @@ Param(
 # This readable text script opens no ports, starts no background service, and installs no binary package.
 # Structured output includes admin_required=false, hardware_verified=false,
 # production_live_ready=false, and osc_writes_sent=0.
-# First-run TTY wizard is future work: DXBMARK style in TTY, non-TTY plain and JSON fallback.
+# TTY installer wizard uses DXBMARK style; non-TTY stays plain and JSON stays machine-readable.
 # Post-install checks: m32-bridge health, m32-bridge setup, m32-bridge get-info,
 # m32-bridge detect-device, m32-bridge doctor-runtime.
 # MCP guidance is manual-copy only: use m32-bridge mcp-server as a local stdio
@@ -29,6 +29,12 @@ Param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$script:RuntimeBootstrapSucceeded = $false
+$env:M32_POWERSHELL_VERSION = $PSVersionTable.PSVersion.ToString()
+# Keep these values in parity with src/m32_bridge/installer/runtime_manager.py.
+$ApprovedPythonMinor = "3.13"
+$ProjectPythonRange = ">=3.11,<3.14"
+$UvInstallUrlWindows = "https://astral.sh/uv/install.ps1"
 
 function Show-M32Help {
     @"
@@ -44,6 +50,9 @@ Targets:
     m32-bridge detect-device
     m32-bridge doctor-runtime
     m32-bridge mcp-server
+  Managed runtime:
+    CPython 3.13.x installed and launched only through uv
+    Project range >=3.11,<3.14; system Python unchanged
   Lifecycle guidance:
     update, repair, uninstall
     retain saved config by default
@@ -57,12 +66,288 @@ Recommended trust workflow:
 
 Execution policy guidance:
   PowerShell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -DryRun
+  This override is process-scoped for that PowerShell process only.
+  This script does not call Set-ExecutionPolicy and makes no permanent policy change.
 
 Options:
+  -Help
   -DryRun
   -Json
   -Platform windows_powershell|windows_cmd
+  -TargetVersion <version>
+
+Installer commands:
+  /status /health /setup /get-info /verify-device /doctor-runtime
+  /contact /clear /exit
+
+Contact:
+  Website                   : https://www.dxbmark.com
+  Email                     : support@dxbmark.com
+  Phone / WhatsApp          : +971505121583
 "@
+}
+
+function Test-InteractiveTty {
+    return -not $Json -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected
+}
+
+function Show-InstallerHelp {
+    @"
+/help - show installer sections and safe next commands
+/contact - show DXBMARK support contact
+/status - show installer/runtime/source/safety state
+/clear - redraw the installer screen
+/exit - exit the installer TTY flow
+Dry-run prints the plan without writing app or launcher files.
+JSON mode is for CI and never includes banners or ANSI colours.
+Missing uv requires explicit user-local setup; no global py is required.
+Managed Python is CPython 3.13.x through uv; system Python stays unchanged.
+Website                   : https://www.dxbmark.com
+Email                     : support@dxbmark.com
+Phone / WhatsApp          : +971505121583
+"@
+}
+
+function Show-InstallerContact {
+    @"
+DXBMARK Support
+Website                   : https://www.dxbmark.com
+Email                     : support@dxbmark.com
+Phone / WhatsApp          : +971505121583
+"@
+}
+
+function Write-InstallerHeading([string]$Text) {
+    if (Test-InteractiveTty) {
+        Write-Host $Text -ForegroundColor DarkYellow
+    } else {
+        Write-Output $Text
+    }
+}
+
+function Write-CanvasLine([string]$Text) {
+    if (-not (Test-InteractiveTty)) {
+        Write-Output $Text
+        return
+    }
+    $width = [Console]::WindowWidth - 1
+    if ($width -lt 20) { $width = 20 }
+    $line = if ($Text.Length -gt $width) { $Text.Substring(0, $width) } else { $Text.PadRight($width) }
+    Write-Output "`e[48;2;36;57;71m$line"
+}
+
+function Show-MissingUvWizard($Payload) {
+    $mode = if ($DryRun) { "dry-run" } else { "status" }
+    if (Test-InteractiveTty) {
+        Write-Output "`e[48;2;36;57;71m`e[2J`e[H`e[38;2;249;126;26m"
+    }
+    (@"
+DXBMARK M32 BRIDGE INSTALLER
+#  ______  ______  __  __    _    ____  _  __
+# |  _ \ \/ / __ )|  \/  |  / \  |  _ \| |/ / LLC
+# | | | \  /|  _ \| |\/| | / _ \ | |_) | ' /
+# | |_| /  \| |_) | |  | |/ ___ \|  _ <| . \
+# |____/_/\_\____/|_|  |_/_/   \_\_| \_\_|\_\ dxbmark.com
+User-local installer. No admin, no service, no binary package.
+Type / for interactive menu | Type /help for list
+
+System Check
+  OS: $($Payload.platform)
+  architecture: $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)
+  shell: powershell
+Download capability
+  Primary tool: PowerShell Invoke-WebRequest/Invoke-RestMethod available
+  wget fallback: optional, not installed
+  Manual fallback: available
+  uv status: missing
+  Python strategy: CPython 3.13.x managed by uv; system Python unchanged; no global py required
+
+Source Check
+  install_source: $($Payload.install_source)
+  source_url: $($Payload.source_url)
+  source_ref: $($Payload.source_ref)
+  Source configuration: configured: github source archive
+  Reachability: not_checked
+
+Install Plan
+  mode: $mode
+  status: $($Payload.status)
+  install_root: $($Payload.install_root)
+  app_path: $($Payload.app_path)
+  launcher_path: $($Payload.launcher_path)
+  user_local=true
+  admin_required=false
+
+Safety
+  osc_writes_sent=0
+  hardware_verified=false
+  production_live_ready=false
+  no /set
+  no OSC writes
+  no IDE or MCP client config writes
+
+Required Actions
+  INSTALL_UV_USER_LOCAL: Install uv in user space
+    reason: M32 Bridge uses uv to manage Python runtime dependencies without system Python launcher assumptions.
+    command: Invoke-RestMethod downloads the official installer to a temporary file; run only after exact INSTALL confirmation
+    confirmation_required=true
+
+Quick Actions
+  /health          Check runtime and installation readiness
+  /setup           Configure a known console endpoint
+  /get-info        Read information from the configured endpoint
+  /verify-device   Verify the configured endpoint; no network scan
+  /doctor-runtime  Diagnose local runtime issues
+
+Commands
+  /help
+  /contact
+  /status
+  /clear
+  /exit
+"@) -split "`n" | ForEach-Object { Write-CanvasLine $_ }
+}
+
+function Read-MissingUvTtyCommand {
+    if (-not (Test-InteractiveTty) -or $DryRun) {
+        return
+    }
+    @"
+Required Runtime Setup
+
+uv is required to install and run M32 Bridge.
+It will be installed for the current user only.
+No administrator access is required.
+System Python will not be changed.
+
+Options:
+  [1] Install uv user-locally
+  [2] Show manual instructions
+  [3] Exit
+"@
+    $answer = Read-Host "Select [1-3]"
+    switch ($answer.ToLowerInvariant()) {
+        "/help" { Show-InstallerHelp }
+        "help" { Show-InstallerHelp }
+        "/contact" { Show-InstallerContact }
+        "contact" { Show-InstallerContact }
+        "/status" {
+            "installer state: RUNTIME_SETUP_REQUIRED"
+            "uv: missing"
+            "install source: $SourceKind"
+            "Source configuration: configured: github source archive"
+            "Reachability: not_checked"
+            "safety: osc_writes_sent=0, hardware_verified=false, production_live_ready=false"
+        }
+        "status" {
+            "installer state: RUNTIME_SETUP_REQUIRED"
+            "uv: missing"
+            "install source: $SourceKind"
+            "Source configuration: configured: github source archive"
+            "Reachability: not_checked"
+            "safety: osc_writes_sent=0, hardware_verified=false, production_live_ready=false"
+        }
+        "/clear" {
+            Clear-Host
+            Show-MissingUvWizard $payload
+        }
+        "clear" {
+            Clear-Host
+            Show-MissingUvWizard $payload
+        }
+        "/exit" {
+            "status=RUNTIME_SETUP_REQUIRED"
+            "No dependency action was taken."
+        }
+        "1" { Install-ApprovedRuntime }
+        "2" { "Download $UvInstallUrlWindows, inspect it, install uv for your user, then run: uv python install $ApprovedPythonMinor" }
+        "3" {
+            "status=RUNTIME_SETUP_REQUIRED"
+            "No dependency action was taken."
+        }
+        default {
+            "status=RUNTIME_SETUP_REQUIRED"
+            "No dependency action was taken."
+        }
+    }
+}
+
+function Install-ApprovedRuntime {
+    @"
+Source
+  Official installer URL: https://astral.sh/uv/install.ps1
+
+Target
+  User-local uv installation paths
+
+Managed Python
+  CPython 3.13.x
+  Installed and used only through uv
+
+Changes
+  Downloads uv installer to a temporary file
+  Installs uv for the current user
+  Installs approved managed Python if required
+  May provide PATH guidance
+  Does not use administrator elevation
+  Does not change system Python
+  Does not install wget or curl
+
+Type INSTALL to continue.
+"@
+    $confirmation = Read-Host
+    if ($confirmation -cne "INSTALL") {
+        "Exact INSTALL confirmation was not provided. No download or install was performed."
+        return
+    }
+    $temporaryBase = [System.IO.Path]::GetTempFileName()
+    $temporaryPath = "$temporaryBase.ps1"
+    Move-Item -LiteralPath $temporaryBase -Destination $temporaryPath -Force
+    try {
+        "URL: $UvInstallUrlWindows"
+        "Temporary path: $temporaryPath"
+        Invoke-RestMethod -Uri $UvInstallUrlWindows -OutFile $temporaryPath
+        if (-not (Test-Path $temporaryPath) -or (Get-Item $temporaryPath).Length -eq 0) {
+            throw "Downloaded uv installer is empty."
+        }
+        & $temporaryPath
+        if ($LASTEXITCODE -ne 0) {
+            throw "uv installer execution failed with exit code $LASTEXITCODE."
+        }
+    } catch {
+        "Runtime bootstrap failed: $($_.Exception.GetType().Name): $($_.Exception.Message)"
+        return
+    } finally {
+        Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $temporaryBase -Force -ErrorAction SilentlyContinue
+    }
+    $uvCommand = Get-Command uv -ErrorAction SilentlyContinue
+    $uvPath = if ($null -ne $uvCommand) { $uvCommand.Source } else { $null }
+    if ([string]::IsNullOrEmpty($uvPath)) {
+        $candidate = Join-Path $env:USERPROFILE ".local\bin\uv.exe"
+        if (Test-Path $candidate) {
+            $uvPath = $candidate
+        }
+    }
+    if ([string]::IsNullOrEmpty($uvPath)) {
+        "uv was installed but could not be rediscovered. Open a new terminal or add the reported user-local path."
+        return
+    }
+    & $uvPath --version
+    $env:UV_MANAGED_PYTHON = "1"
+    & $uvPath python install $ApprovedPythonMinor
+    if ($LASTEXITCODE -ne 0) {
+        "Managed CPython 3.13 installation failed."
+        return
+    }
+    $managedPython = (& $uvPath python find --managed-python $ApprovedPythonMinor 2>$null | Select-Object -Last 1)
+    if ([string]::IsNullOrWhiteSpace($managedPython) -or -not (Test-Path $managedPython)) {
+        "Managed CPython 3.13 could not be rediscovered."
+        return
+    }
+    & $managedPython --version
+    "Managed Python path: $managedPython"
+    $script:RuntimeBootstrapSucceeded = $true
 }
 
 if ($args -contains "-Help" -or $args -contains "--help") {
@@ -125,6 +410,11 @@ function Get-MissingUvPayload {
         uv_detected = $false
         python_required = $true
         python_managed_by_uv = $true
+        approved_python_minor = $ApprovedPythonMinor
+        project_python_range = $ProjectPythonRange
+        system_python_modified = $false
+        global_python_installed = $false
+        default_python_aliases_installed = $false
         installer_can_continue = $false
         confirmation_required = $true
         uv_status = "manual_action_required"
@@ -184,8 +474,25 @@ if ($DryRun) {
 if ($Json) {
     $runtimeArgs += "--json"
 }
+if (Test-InteractiveTty) {
+    $runtimeArgs += "--tty"
+}
 
-if (Get-Command uv -ErrorAction SilentlyContinue) {
+$uvCommand = Get-Command uv -ErrorAction SilentlyContinue
+if ($null -eq $uvCommand -and -not $Json -and -not $DryRun -and (Test-InteractiveTty)) {
+    $payload = Get-MissingUvPayload
+    Show-MissingUvWizard $payload
+    Read-MissingUvTtyCommand
+    $uvCommand = Get-Command uv -ErrorAction SilentlyContinue
+    if ($null -eq $uvCommand -and $script:RuntimeBootstrapSucceeded) {
+        $candidate = Join-Path $env:USERPROFILE ".local\bin\uv.exe"
+        if (Test-Path $candidate) {
+            $uvCommand = Get-Item $candidate
+        }
+    }
+}
+
+if ($null -ne $uvCommand) {
     if ($SourceKind -ne "local_checkout") {
         Initialize-RemoteSource
         if ([string]::IsNullOrEmpty($existingPythonPath)) {
@@ -194,14 +501,21 @@ if (Get-Command uv -ErrorAction SilentlyContinue) {
             $env:PYTHONPATH = "$(Join-Path $RepoRoot "src");$existingPythonPath"
         }
     }
+    if (-not (Test-Path (Join-Path $RepoRoot "uv.lock"))) {
+        throw "uv.lock is required for reproducible frozen runtime execution. Refusing unfrozen install."
+    }
     if ([string]::IsNullOrEmpty($env:UV_CACHE_DIR)) {
         $env:UV_CACHE_DIR = Join-Path $env:TEMP "uv-cache"
     }
-    & uv run python @runtimeArgs
+    $uvPath = if ($uvCommand.PSObject.Properties.Name -contains "Source") { $uvCommand.Source } else { $uvCommand.FullName }
+    $env:UV_MANAGED_PYTHON = "1"
+    & $uvPath run --frozen --managed-python --python $ApprovedPythonMinor python @runtimeArgs
 } else {
     $payload = Get-MissingUvPayload
     if ($Json) {
         $payload | ConvertTo-Json -Depth 4
+    } elseif ((Test-InteractiveTty) -and $DryRun) {
+        Show-MissingUvWizard $payload
     } else {
         "M32 Bridge installer status"
         "mode: $(if ($DryRun) { "dry-run" } else { "status" })"
@@ -215,6 +529,9 @@ if (Get-Command uv -ErrorAction SilentlyContinue) {
         "admin_required=false"
         "global_py_required=false"
         "global_python_required=false"
+        "approved_python_minor=$ApprovedPythonMinor"
+        "project_python_range=$ProjectPythonRange"
+        "system_python_modified=false"
         "installer_can_continue=false"
         "uv_status=manual_action_required"
         "hardware_verified=false"

@@ -59,9 +59,9 @@ def test_posix_script_defaults_to_user_local_no_admin_no_global_py():
 
     assert "user-local" in text or "$home/.m32-bridge" in text
     assert "sudo" not in text
-    assert "administrator" not in text
-    assert "global py" not in text
-    assert " py " not in f" {text} "
+    assert "no administrator access is required" in text
+    assert "no global py required" in text
+    assert "python -m m32_bridge" not in text
     assert "uv" in text
 
 

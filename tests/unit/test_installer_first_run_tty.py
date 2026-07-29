@@ -11,10 +11,15 @@ def test_tty_wizard_renders_dxbmark_brand_tokens(tmp_path):
     text = render_tty_intro(summary, clients)
 
     assert "DXBMARK" in text
-    assert "#243947" in text
-    assert "#F97E1A" in text
-    assert "ASCII DXBMARK banner" in text
-    assert "full raw-mode TUI is not enabled" in text
+    assert "#243947" not in text
+    assert "#F97E1A" not in text
+    assert "Palette:" not in text
+    assert "Canvas:" not in text
+    assert "Accent:" not in text
+    assert "Status palette:" not in text
+    assert "\x1b[2J" not in text
+    assert "dxbmark.com" in text
+    assert "Type / for interactive menu" in text
     assert "[System]" in text
     assert "[Runtime]" in text
     assert "[Clients]" in text
@@ -22,6 +27,9 @@ def test_tty_wizard_renders_dxbmark_brand_tokens(tmp_path):
     assert "[Help]" in text
     assert "/help" in text
     assert "/contact" in text
+    assert "/status" in text
+    assert "/clear" in text
+    assert "/exit" in text
     assert "Recommended mode:" in text
     assert "green" in text
     assert "grey" in text
@@ -76,3 +84,4 @@ def test_contact_shows_dxbmark_branded_contact():
     assert "DXBMARK" in text
     assert "https://www.dxbmark.com" in text
     assert "support@" in text
+    assert "+971505121583" in text

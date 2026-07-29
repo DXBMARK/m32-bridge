@@ -34,13 +34,13 @@ def test_windows_installer_uses_powershell_irm_and_only_curl_exe_as_optional_fal
 
     assert "install.ps1" in text
     assert "irm" in text or "invoke-restmethod" in text
-    if "curl" in text:
-        assert "curl.exe" in text
-        assert "alias curl" not in text
+    assert "powershell invoke-webrequest/invoke-restmethod available" in text
+    assert "does not install wget or curl" in text
+    assert "+971505121583" in text
     assert "download" in text
     assert "inspect" in text
     assert "dry-run" in text or "dry_run" in text
-    assert "/set" not in text
+    assert "no /set" in text
     assert "send_raw_osc" not in text
     assert "state-changing osc" not in text
 
@@ -63,7 +63,7 @@ def test_windows_script_supports_local_checkout_and_github_bootstrap_metadata():
 
 def test_windows_missing_uv_payload_is_not_fresh_install_success():
     text = _install_ps1_text().lower()
-    missing_uv_block = text.split("if (get-command uv", 1)[1].split("} else {", 1)[1]
+    missing_uv_block = text.split("if ($null -ne $uvcommand)", 1)[1].split("} else {", 1)[1]
 
     assert 'status = "runtime_setup_required"' in text
     assert "installer_can_continue = $false" in text
@@ -77,12 +77,19 @@ def test_windows_missing_uv_payload_is_not_fresh_install_success():
     assert "start-process -verb runas" not in text
 
 
-def test_windows_first_run_wizard_mentions_future_dxbmark_style_with_plain_json_fallback():
+def test_windows_installer_wizard_mentions_dxbmark_style_with_plain_json_fallback():
     text = _install_ps1_text().lower()
 
     assert "dxbmark" in text
     assert "tty" in text
+    assert '$runtimeargs += "--tty"' in text
+    assert "48;2;36;57;71" in text
+    assert "write-canvasline" in text
+    assert "windowwidth" in text
     assert "non-tty" in text or "non_tty" in text
-    assert "plain" in text
+    assert "system check" in text
+    assert "source check" in text
+    assert "install plan" in text
+    assert "required actions" in text
     assert "json" in text
     assert "raw interactive theme" not in text

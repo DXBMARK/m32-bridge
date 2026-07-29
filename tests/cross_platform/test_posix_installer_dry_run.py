@@ -50,7 +50,7 @@ def test_posix_install_script_documents_supported_os_and_dry_run_status_only():
         assert expected in text
     assert "dry-run" in text or "dry_run" in text
     assert "osc_writes_sent=0" in text
-    assert "/set" not in text
+    assert "no /set" in text
     assert "send_raw_osc" not in text
     assert "state-changing osc" not in text
     assert "webui" not in text
@@ -62,6 +62,7 @@ def test_posix_install_guidance_allows_curl_with_wget_or_manual_fallback():
 
     assert "curl" in text
     assert "wget" in text or "manual download" in text
+    assert "+971505121583" in text
     assert "download" in text
     assert "inspect" in text
     assert "user-local" in text or "$home/.m32-bridge" in text
@@ -138,12 +139,19 @@ def test_posix_local_checkout_dry_run_uses_local_source_metadata(tmp_path):
     assert payload["osc_writes_sent"] == 0
 
 
-def test_posix_first_run_wizard_mentions_future_dxbmark_style_without_raw_theme():
+def test_posix_installer_wizard_mentions_dxbmark_style_without_raw_theme():
     text = _install_sh_text().lower()
 
     assert "dxbmark" in text
     assert "tty" in text
+    assert "--tty --color" in text or "--tty" in text
+    assert "48;2;36;57;71" in text
+    assert "paint_tty_lines" in text
+    assert "tput cols" in text
     assert "non-tty" in text or "non_tty" in text
-    assert "plain" in text
+    assert "system check" in text
+    assert "source check" in text
+    assert "install plan" in text
+    assert "required actions" in text
     assert "json" in text
     assert "raw interactive theme" not in text

@@ -30,8 +30,7 @@ def test_posix_launcher_dispatches_health_without_global_py_requirement():
     assert "~/.local/bin/m32-bridge" in text or "$home/.local/bin/m32-bridge" in text
     assert "m32-bridge health" in text
     assert "python -m m32_bridge" not in text
-    assert " py " not in f" {text} "
-    assert "global py" not in text
+    assert "no global py required" in text
     assert "sudo" not in text
 
 

@@ -51,7 +51,8 @@ def test_macos_mcp_registry_bootstrap_smoke_has_no_webui_or_public_network():
     startup = startup_verification()
 
     assert "m32_console_status" in registry.names()
-    assert startup["python_version"].startswith("3.12.")
+    assert startup["python_version"].startswith("3.13.")
+    assert startup["python_approved"] is True
     assert startup["local_process"] is True
     assert startup["webui"] is False
     assert startup["database"] is False

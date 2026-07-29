@@ -26,7 +26,7 @@ from m32_bridge.config.schemas import validate_with_schema
 from m32_bridge.core.connection import ConnectionController
 from m32_bridge.diagnostics.device_identity import classify_device
 from m32_bridge.diagnostics.os_recommendations import build_os_recommendations
-from m32_bridge.diagnostics.runtime import runtime_diagnostics, setup_info_probe
+from m32_bridge.diagnostics.runtime import setup_info_probe
 from m32_bridge.diagnostics.runtime_output import runtime_output
 from m32_bridge.osc.client import OscClient
 from m32_bridge.osc.discovery import discover_identity, read_state_value
@@ -37,13 +37,24 @@ DEFAULT_REQUIRED_PATHS = ("/ch/01/headamp/gain", "/rta/source")
 
 
 def health() -> dict[str, Any]:
+    from m32_bridge.installer.runtime_manager import local_runtime_diagnostics
+
+    runtime = local_runtime_diagnostics()
     result = _base_result("health", "ok")
     result["checks"] = {
         "cli": "ok",
+        "runtime": runtime,
+        "config": "present" if default_user_config_path().exists() else "not_configured",
+        "launcher": runtime.get("launcher_file"),
+        "source": "local_checkout" if Path("pyproject.toml").is_file() else "installed_user_local",
+        "console_probe": "not_run",
+        "network_scan": False,
+        "osc_writes_sent": 0,
         "mcp_primary_transport": "stdio",
         "webui": "absent",
         "production_live_ready": False,
     }
+    result["osc_writes_sent"] = 0
     result["hardware_verified"] = False
     result["production_live_ready"] = False
     return result
@@ -324,6 +335,18 @@ def get_info_runtime(
         port = 10023
     probe = probe_result or setup_info_probe(str(host).strip(), port, timeout=timeout)
     connected = probe.get("udp_info_probe_result") == "CONNECTED"
+    info_raw = list(probe.get("info_raw") or [])
+    info_data = {
+        "info_raw": probe.get("info_raw"),
+        "model": str(info_raw[0]) if len(info_raw) >= 1 else None,
+        "firmware": str(info_raw[1]) if len(info_raw) >= 2 else None,
+        "api_version": str(info_raw[2]) if len(info_raw) >= 3 else None,
+        "name": str(info_raw[3]) if len(info_raw) >= 4 else None,
+        "host": str(host).strip(),
+        "port": port,
+        "latency_ms": probe.get("latency_ms"),
+        "classification": "CONNECTED_UNVERIFIED" if connected else "unknown",
+    }
     return runtime_output(
         ok=bool(connected),
         status="CONNECTED" if connected else "NOT_CONNECTED",
@@ -336,7 +359,8 @@ def get_info_runtime(
         exception_type=probe.get("exception_type"),
         response_address=probe.get("response_address"),
         connected=connected,
-        data={"info_raw": probe.get("info_raw")},
+        classification="CONNECTED_UNVERIFIED" if connected else "unknown",
+        data=info_data,
         recommendations=["Run m32-bridge setup if this endpoint is not the intended console."],
         osc_writes_sent=0,
         hardware_verified=False,
@@ -351,7 +375,24 @@ def doctor_runtime_command(
     timeout: float,
     environ: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    payload = runtime_diagnostics(host=host, port=port, timeout=timeout, environ=environ)
+    from m32_bridge.installer.runtime_manager import local_runtime_diagnostics
+
+    payload = local_runtime_diagnostics(environ=environ)
+    payload.update(
+        {
+            "control": "doctor-runtime",
+            "configured_host": host,
+            "configured_port": port,
+            "requested_timeout": timeout,
+            "attempted_path": None,
+            "console_probe": "not_run",
+            "connection_lifecycle": "not_checked",
+            "structured": True,
+            "osc_writes_sent": 0,
+            "hardware_verified": False,
+            "production_live_ready": False,
+        }
+    )
     payload["os_recommendations"] = _current_os_recommendations()
     return payload
 

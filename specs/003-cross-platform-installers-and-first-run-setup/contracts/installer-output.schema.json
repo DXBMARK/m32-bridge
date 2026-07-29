@@ -253,6 +253,66 @@
         "null"
       ]
     },
+    "dry_run": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "approved_python_minor": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "project_python_range": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "managed_python_policy": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": true
+    },
+    "runtime_info": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": true
+    },
+    "platform_info": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": true
+    },
+    "system_python_modified": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "const": false
+    },
+    "global_python_installed": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "const": false
+    },
+    "default_python_aliases_installed": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "const": false
+    },
     "installer_can_continue": {
       "type": [
         "boolean",

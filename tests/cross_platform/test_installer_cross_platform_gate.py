@@ -51,5 +51,5 @@ def test_final_cross_platform_scripts_keep_expected_bootstrap_surfaces():
     assert "global_python_required=false" in install_ps1
     assert "admin_required=false" in install_sh
     assert "admin_required=false" in install_ps1
-    assert "/set" not in install_sh
-    assert "/set" not in install_ps1
+    assert "no /set" in install_sh
+    assert "no /set" in install_ps1

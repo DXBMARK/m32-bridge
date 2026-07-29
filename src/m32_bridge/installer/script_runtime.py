@@ -10,7 +10,16 @@ from pathlib import Path
 from typing import Any
 
 from .planner import plan_dry_run_install
-from .runtime_manager import RuntimeManagerState, detect_uv_status
+from .runtime_manager import (
+    APPROVED_PYTHON_MINOR,
+    PROJECT_PYTHON_RANGE,
+    RuntimeManagerState,
+    detect_uv_status,
+    inspect_runtime,
+    managed_python_policy,
+    platform_information,
+)
+from .tty_app import installer_contact_text, installer_help_text, render_tty_installer, run_tty_app
 
 
 VERSION = "0.1.0"
@@ -37,6 +46,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source-url", default=os.environ.get("M32_INSTALL_SOURCE_URL"))
     parser.add_argument("--source-ref", default=os.environ.get("M32_INSTALL_SOURCE_REF"))
     parser.add_argument("--confirm-dependency-actions", action="store_true")
+    parser.add_argument("--tty", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--color", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
     result = build_install_result(
@@ -54,19 +65,24 @@ def main(argv: list[str] | None = None) -> int:
         source_ref=args.source_ref,
     )
 
+    tty_mode = bool(args.tty or (sys.stdin.isatty() and sys.stdout.isatty() and not args.json_output))
     if not args.dry_run:
         if not result["installer_can_continue"]:
             if args.json_output:
                 print(json.dumps(result, indent=2, sort_keys=True))
+            elif tty_mode:
+                run_tty_app(args.surface, result, dry_run=args.dry_run, color=args.color)
             else:
-                _print_plain(args.surface, result, dry_run=args.dry_run)
+                _print_plain(args.surface, result, dry_run=args.dry_run, tty=tty_mode, color=args.color)
             return 1
         result = perform_apply_install(args.surface, result)
 
     if args.json_output:
         print(json.dumps(result, indent=2, sort_keys=True))
+    elif tty_mode:
+        run_tty_app(args.surface, result, dry_run=args.dry_run, color=args.color)
     else:
-        _print_plain(args.surface, result, dry_run=args.dry_run)
+        _print_plain(args.surface, result, dry_run=args.dry_run, tty=tty_mode, color=args.color)
     return 0 if result["ok"] else 1
 
 
@@ -190,6 +206,7 @@ def build_install_result(
         result["error_code"] = result.get("error_code") or "PARTIAL_FAILURE_RECOVERY_REQUIRED"
     result.update(
         {
+            "dry_run": dry_run,
             "install_source": install_source,
             "source_url": source_url,
             "source_ref": source_ref or target_version or VERSION,
@@ -199,6 +216,14 @@ def build_install_result(
             "python_required": True,
             "global_python_required": False,
             "python_managed_by_uv": True,
+            "managed_python_policy": managed_python_policy(),
+            "approved_python_minor": APPROVED_PYTHON_MINOR,
+            "project_python_range": PROJECT_PYTHON_RANGE,
+            "runtime_info": inspect_runtime(),
+            "platform_info": platform_information(),
+            "system_python_modified": False,
+            "global_python_installed": False,
+            "default_python_aliases_installed": False,
             "installer_can_continue": uv_detected and (not required_actions or confirmed_dependency_actions),
             "confirmation_required": bool(required_actions),
             "required_actions": required_actions,
@@ -296,8 +321,9 @@ def _apply_user_local_install(surface: str, result: dict[str, Any]) -> None:
             "@echo off\r\n"
             f"set \"M32_BRIDGE_APP_DIR={app_path}\"\r\n"
             f"set \"PYTHONPATH={app_path}\\src;%PYTHONPATH%\"\r\n"
+            "set \"UV_MANAGED_PYTHON=1\"\r\n"
             "cd /d \"%M32_BRIDGE_APP_DIR%\"\r\n"
-            "uv run --project \"%M32_BRIDGE_APP_DIR%\" python -m m32_bridge.__main__ %*\r\n",
+            "uv run --frozen --managed-python --python 3.13 --project \"%M32_BRIDGE_APP_DIR%\" python -m m32_bridge.__main__ %*\r\n",
             encoding="utf-8",
         )
     else:
@@ -306,8 +332,9 @@ def _apply_user_local_install(surface: str, result: dict[str, Any]) -> None:
             f"APP_DIR='{app_path}'\n"
             "cd \"$APP_DIR\"\n"
             "PYTHONPATH=\"$APP_DIR/src${PYTHONPATH:+:$PYTHONPATH}\"\n"
-            "export M32_BRIDGE_APP_DIR=\"$APP_DIR\" PYTHONPATH\n"
-            "exec uv run --project \"$APP_DIR\" python -m m32_bridge.__main__ \"$@\"\n",
+            "UV_MANAGED_PYTHON=1\n"
+            "export M32_BRIDGE_APP_DIR=\"$APP_DIR\" PYTHONPATH UV_MANAGED_PYTHON\n"
+            "exec uv run --frozen --managed-python --python 3.13 --project \"$APP_DIR\" python -m m32_bridge.__main__ \"$@\"\n",
             encoding="utf-8",
         )
         launcher_path.chmod(0o755)
@@ -317,7 +344,7 @@ def _materialize_app(app_path: Path, *, source_root: Path | None = None) -> None
     source = source_root or _repo_root()
     _assert_materialization_source(source)
     app_path.mkdir(parents=True, exist_ok=True)
-    for filename in ("pyproject.toml", "uv.lock", "README.md"):
+    for filename in ("pyproject.toml", "uv.lock", ".python-version", "README.md"):
         src = source / filename
         if src.is_file():
             shutil.copy2(src, app_path / filename)
@@ -329,7 +356,7 @@ def _repo_root() -> Path:
 
 
 def _assert_materialization_source(source: Path) -> None:
-    required = [source / "pyproject.toml", source / "src" / "m32_bridge"]
+    required = [source / "pyproject.toml", source / "uv.lock", source / "src" / "m32_bridge"]
     missing = [str(path) for path in required if not path.exists()]
     if missing:
         raise OSError(f"materialization source missing required files: {', '.join(missing)}")
@@ -377,15 +404,15 @@ def _dependency_target_root(surface: str, home: Path | str | None, local_app_dat
 
 def _uv_required_action(surface: str, target_root: Path) -> dict[str, Any]:
     if surface == "windows":
-        command_preview = "irm https://astral.sh/uv/install.ps1 -OutFile install-uv.ps1; inspect install-uv.ps1; run only after confirmation"
+        command_preview = "Invoke-RestMethod downloads https://astral.sh/uv/install.ps1 to a temporary file; run only after exact INSTALL confirmation; then uv python install 3.13"
         target_paths = [str(target_root / "M32Bridge" / "runtime" / "uv")]
     else:
-        command_preview = "curl -LsSf https://astral.sh/uv/install.sh -o install-uv.sh; inspect install-uv.sh; run only after confirmation"
+        command_preview = "curl downloads https://astral.sh/uv/install.sh to a temporary file (wget/manual fallback); run only after exact INSTALL confirmation; then uv python install 3.13"
         target_paths = [str(target_root / ".local" / "bin" / "uv")]
     return {
         "action_id": "INSTALL_UV_USER_LOCAL",
         "title": "Install uv in user space",
-        "reason": "M32 Bridge uses uv to manage Python runtime dependencies without global Python or global py assumptions.",
+        "reason": "M32 Bridge uses uv-managed CPython 3.13 without changing system Python or installing default aliases.",
         "command_preview": command_preview,
         "requires_confirmation": True,
         "risk_level": "user_local",
@@ -446,8 +473,8 @@ def _recommendations(surface: str, result: dict[str, Any]) -> list[str]:
     common = [
         "Run m32-bridge health after install.",
         "Post-install verification commands: m32-bridge health, m32-bridge setup, m32-bridge get-info, m32-bridge detect-device, m32-bridge doctor-runtime.",
-        "Run m32-bridge setup later for the first-run TTY wizard.",
-        "Future first-run TTY wizard uses DXBMARK style; non-TTY output stays plain or JSON.",
+        "Run m32-bridge setup later for console endpoint setup.",
+        "TTY installer output uses DXBMARK styled sections; JSON stays machine-readable.",
         "No /set, OSC writes, hardware verification, or production/live readiness is performed by install evidence.",
         "Manual-copy MCP guidance: use m32-bridge mcp-server as a local stdio command; no Claude, ChatGPT, Gemini, Antigravity, Codex, VS Code, or Cursor config is written automatically.",
         "Lifecycle guidance covers update, repair, and uninstall for user-local app and launcher paths; retain saved config by default.",
@@ -463,7 +490,10 @@ def _recommendations(surface: str, result: dict[str, Any]) -> list[str]:
     return common
 
 
-def _print_plain(surface: str, result: dict[str, Any], *, dry_run: bool) -> None:
+def _print_plain(surface: str, result: dict[str, Any], *, dry_run: bool, tty: bool = False, color: bool = False) -> None:
+    if tty:
+        print(render_tty_installer(surface, result, dry_run=dry_run, color=color))
+        return
     print("M32 Bridge installer status")
     print(f"surface: {surface}")
     print(f"mode: {'dry-run' if dry_run else 'apply'}")

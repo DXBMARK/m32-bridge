@@ -7,7 +7,7 @@ name = "m32-mcp-bridge"
 version = "0.1.0"
 description = "Local safety-first MCP bridge for Midas M32/X32-family OSC control."
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.11,<3.14"
 license = { text = "Proprietary" }
 authors = [
   { name = "M32 MCP Bridge maintainers" }
@@ -42,4 +42,3 @@ markers = [
   "cross_platform: Windows and macOS smoke, packaging, and startup tests",
   "hardware_acceptance: final physical M32 acceptance tests only"
 ]
-

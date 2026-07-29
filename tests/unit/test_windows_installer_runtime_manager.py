@@ -40,10 +40,10 @@ def test_windows_script_guides_execution_policy_user_local_runtime_and_no_global
     assert "executionpolicy" in text or "execution policy" in text
     assert "$env:localappdata" in text or "%localappdata%" in text
     assert "uv" in text
-    assert "administrator" not in text
+    assert "no administrator access is required" in text
     assert "start-process -verb runas" not in text
-    assert "global py" not in text
-    assert " py " not in f" {text} "
+    assert "no global py required" in text
+    assert "python -m m32_bridge" not in text
 
 
 def test_windows_missing_uv_json_result_is_structured_and_non_interactive(monkeypatch, tmp_path):

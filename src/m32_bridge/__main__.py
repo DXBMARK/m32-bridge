@@ -13,7 +13,10 @@ def startup_verification() -> dict[str, Any]:
     return {
         "python_version": platform.python_version(),
         "python_implementation": platform.python_implementation(),
-        "python_312": sys.version_info[:2] == (3, 12),
+        "python_approved": sys.version_info[:2] == (3, 13),
+        "python_313": sys.version_info[:2] == (3, 13),
+        "project_python_range": ">=3.11,<3.14",
+        "system_python_modified": False,
         "platform": platform.system(),
         "local_process": True,
         "webui": False,

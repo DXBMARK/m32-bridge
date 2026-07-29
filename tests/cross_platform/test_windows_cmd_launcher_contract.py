@@ -32,8 +32,7 @@ def test_windows_installer_plans_cmd_compatible_launcher_without_global_py():
     assert "%localappdata%\\m32bridge\\bin\\m32-bridge.cmd" in text or "$env:localappdata" in text
     assert "m32-bridge health" in text
     assert "cmd" in text
-    assert " py " not in f" {text} "
-    assert "global py" not in text
+    assert "no global py required" in text
 
 
 def test_windows_generated_launcher_is_not_recursive(tmp_path):

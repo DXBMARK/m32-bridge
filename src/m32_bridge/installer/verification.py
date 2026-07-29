@@ -10,7 +10,13 @@ from m32_bridge.installer.ide_detector import detect_ide_clients
 from m32_bridge.installer.mcp_guidance import render_mcp_guidance
 from m32_bridge.installer.paths import default_install_location
 from m32_bridge.installer.platforms import installation_target
-from m32_bridge.installer.runtime_manager import detect_uv_status
+from m32_bridge.installer.runtime_manager import (
+    APPROVED_PYTHON_MINOR,
+    PROJECT_PYTHON_RANGE,
+    detect_uv_status,
+    inspect_runtime,
+    managed_python_policy,
+)
 
 
 VERSION = "0.1.0"
@@ -36,6 +42,7 @@ def render_post_install_verification(
     target = _target_from_environment(env)
     location = default_install_location(target, home=home, local_app_data=local_app_data or env.get("LOCALAPPDATA"))
     runtime = detect_uv_status()
+    runtime_info = inspect_runtime(environ=env)
     uv_detected = runtime.uv_status in {"present", "installed_user_local"}
     resolved_config_path = config_path or _default_config_path(home=home)
     resolution = resolve_runtime_config(environ=env, user_config_path=resolved_config_path, allow_project_local=False)
@@ -67,6 +74,10 @@ def render_post_install_verification(
         "global_py_required": False,
         "global_python_required": False,
         "python_managed_by_uv": True,
+        "managed_python_policy": managed_python_policy(),
+        "approved_python_minor": APPROVED_PYTHON_MINOR,
+        "project_python_range": PROJECT_PYTHON_RANGE,
+        "runtime_info": runtime_info,
         "config_path": str(resolved_config_path),
         "config_present": resolved_config_path.exists(),
         "configured_host": resolution.effective_host,
@@ -128,7 +139,7 @@ def _target_from_environment(env: Mapping[str, str]) -> Any:
 
 def _verification_command(command: str) -> dict[str, Any]:
     requires_config = command not in {"m32-bridge health", "m32-bridge setup"}
-    attempted_path = "/info" if command in {"m32-bridge setup", "m32-bridge get-info", "m32-bridge detect-device", "m32-bridge doctor-runtime"} else None
+    attempted_path = "/info" if command in {"m32-bridge setup", "m32-bridge get-info", "m32-bridge detect-device"} else None
     return {
         "command": command,
         "requires_console_config": requires_config,
@@ -154,15 +165,15 @@ def _dependency_target_root(surface: str, home: Path | None, local_app_data: Pat
 
 def _uv_required_action(surface: str, target_root: Path) -> dict[str, Any]:
     if surface == "windows":
-        command_preview = "irm https://astral.sh/uv/install.ps1 -OutFile install-uv.ps1; inspect install-uv.ps1; run only after confirmation"
+        command_preview = "Invoke-RestMethod downloads the official uv installer to a temporary file; exact INSTALL confirmation required; then uv python install 3.13"
         target_paths = [str(target_root / "M32Bridge" / "runtime" / "uv")]
     else:
-        command_preview = "curl -LsSf https://astral.sh/uv/install.sh -o install-uv.sh; inspect install-uv.sh; run only after confirmation"
+        command_preview = "curl downloads the official uv installer to a temporary file (wget/manual fallback); exact INSTALL confirmation required; then uv python install 3.13"
         target_paths = [str(target_root / ".local" / "bin" / "uv")]
     return {
         "action_id": "INSTALL_UV_USER_LOCAL",
         "title": "Install uv in user space",
-        "reason": "M32 Bridge uses uv to manage Python runtime dependencies without global Python or global py assumptions.",
+        "reason": "M32 Bridge uses uv-managed CPython 3.13 without modifying system Python or default aliases.",
         "command_preview": command_preview,
         "requires_confirmation": True,
         "risk_level": "user_local",

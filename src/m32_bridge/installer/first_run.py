@@ -13,9 +13,8 @@ from m32_bridge.installer.paths import default_install_location
 from m32_bridge.installer.platforms import installation_target
 from m32_bridge.installer.runtime_manager import RuntimeManagerState, detect_uv_status
 from m32_bridge.installer.script_runtime import _uv_required_action
+from m32_bridge.installer.tty_app import handle_tty_command, installer_contact_text, installer_help_text
 
-BG = "#243947"
-ORANGE = "#F97E1A"
 BANNER = "DXBMARK M32 BRIDGE"
 ConnectivityChecker = Callable[[str, int, float], bool]
 
@@ -46,7 +45,8 @@ def environment_summary(
         "recommended_mode": "interactive_first_run" if uv_detected else "runtime_setup_required",
         "surface": "windows" if target.os_family == "windows" else "posix",
         "internet_status": check_internet_connectivity(checker=internet_checker),
-        "github_install_source": check_github_install_source(checker=github_checker),
+        "github_install_source": "configured: github source archive",
+        "github_reachability": "not_checked",
         "uv_detected": uv_detected,
         "uv_status": uv_state.uv_status,
         "python_managed_by_uv": True,
@@ -92,13 +92,11 @@ def non_tty_setup_response(
 
 def render_tty_intro(summary: dict[str, Any], clients: list[dict[str, Any]]) -> str:
     client_lines = [f"{_dot(c)} {c['name']}: {c['status']}" for c in clients]
-    return "\n".join(
+    setup_panel = "\n".join(
         [
             BANNER,
-            "ASCII DXBMARK banner",
-            f"Canvas: {BG}",
-            f"Accent: DXBMARK Flame Orange {ORANGE}",
-            "MVP enhanced terminal setup; full raw-mode TUI is not enabled in installers.",
+            "DXBMARK LLC | dxbmark.com",
+            "Type / for interactive menu | Type /help for list",
             "",
             "[System]",
             f"OS: {summary['os']}",
@@ -111,7 +109,8 @@ def render_tty_intro(summary: dict[str, Any], clients: list[dict[str, Any]]) -> 
             f"uv: {'green dot detected' if summary['uv_detected'] else 'grey dot missing'}",
             f"Python: managed by uv",
             f"Internet: {summary['internet_status']}",
-            f"GitHub install source: {summary['github_install_source']}",
+            f"Source configuration: {summary['github_install_source']}",
+            f"Reachability: {summary['github_reachability']}",
             "",
             "[Clients]",
             *client_lines,
@@ -121,26 +120,19 @@ def render_tty_intro(summary: dict[str, Any], clients: list[dict[str, Any]]) -> 
             "Port: default 10023",
             "",
             "[Help]",
-            "/help  /contact",
+            "/help  /contact  /status  /clear  /exit",
             "Status: green dot detected / grey dot not detected",
         ]
     )
+    return setup_panel
 
 
 def help_text() -> str:
-    return "\n".join(
-        [
-            "/help - explain setup commands and fields",
-            "/contact - show DXBMARK support contact",
-            "Console IP - enter the console address you already know; setup will not guess or scan",
-            "Port - press Enter for 10023",
-            "Save - writes user-local runtime config only after confirmation",
-        ]
-    )
+    return installer_help_text(width=80)
 
 
 def contact_text() -> str:
-    return "DXBMARK LLC Contact\nWebsite: https://www.dxbmark.com\nSupport: support@dxbmark.com"
+    return installer_contact_text(width=80)
 
 
 def run_setup_probe(
@@ -201,9 +193,27 @@ def interactive_wizard(
     clients = detect_ide_clients(environ=environ, os_family=_client_os_family(summary))
     output_func(render_tty_intro(summary, clients))
     host = input_func("Console IP: ").strip()
-    if host in {"/help", "help"}:
-        output_func(help_text())
+    if host in {"/help", "help", "/contact", "contact", "/status", "status", "/clear", "clear"}:
+        command_result = {
+            "ok": False,
+            "status": "SETUP_INPUT_REQUIRED",
+            "platform": summary["os"],
+            "uv_status": summary["uv_status"],
+            "uv_detected": summary["uv_detected"],
+            "install_source": summary["github_install_source"],
+            "source_url": "not_configured",
+            "osc_writes_sent": 0,
+            "hardware_verified": False,
+            "production_live_ready": False,
+        }
+        command = f"/{host}" if not host.startswith("/") else host
+        output, should_stop = handle_tty_command(command, command_result, color=False)
+        output_func(output or help_text())
+        if should_stop:
+            return {"ok": False, "status": "SETUP_CANCELLED", "osc_writes_sent": 0, "hardware_verified": False, "production_live_ready": False}
         host = input_func("Console IP: ").strip()
+    if host in {"/exit", "exit", "quit", "q"}:
+        return {"ok": False, "status": "SETUP_CANCELLED", "osc_writes_sent": 0, "hardware_verified": False, "production_live_ready": False}
     if host in {"/contact", "contact"}:
         output_func(contact_text())
         host = input_func("Console IP: ").strip()
@@ -228,8 +238,10 @@ def _dot(client: dict[str, Any]) -> str:
 def _next_commands() -> list[str]:
     return [
         "m32-bridge health",
+        "m32-bridge setup",
         "m32-bridge get-info",
         "m32-bridge detect-device",
+        "m32-bridge doctor-runtime",
         "m32-bridge mcp-server",
     ]
 

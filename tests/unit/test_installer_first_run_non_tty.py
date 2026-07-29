@@ -19,7 +19,8 @@ def test_non_tty_setup_returns_structured_json_without_prompt(tmp_path):
     assert "required_actions" in encoded
     assert result["structured"] is True
     assert result["environment"]["internet_status"] == "ONLINE"
-    assert result["environment"]["github_install_source"] == "OFFLINE"
+    assert result["environment"]["github_install_source"] == "configured: github source archive"
+    assert result["environment"]["github_reachability"] == "not_checked"
     assert result["osc_writes_sent"] == 0
     assert result["hardware_verified"] is False
     assert result["production_live_ready"] is False
