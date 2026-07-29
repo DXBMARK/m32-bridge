@@ -1,0 +1,494 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import platform as py_platform
+import shutil
+import sys
+from pathlib import Path
+from typing import Any
+
+from .planner import plan_dry_run_install
+from .runtime_manager import RuntimeManagerState, detect_uv_status
+
+
+VERSION = "0.1.0"
+IDEMPOTENCY_STATES = (
+    "fresh_install",
+    "existing_install",
+    "repair",
+    "update",
+    "already_current",
+    "partial_failure",
+    "failed",
+)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="M32 Bridge user-local installer runtime")
+    parser.add_argument("--surface", choices=("posix", "windows"), required=True)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--json", action="store_true", dest="json_output")
+    parser.add_argument("--platform", choices=("macos", "linux", "wsl", "raspberry_pi_os", "windows_powershell", "windows_cmd"))
+    parser.add_argument("--current-version")
+    parser.add_argument("--target-version", default=VERSION)
+    parser.add_argument("--install-source", choices=("local_checkout", "github_raw", "github_release_or_archive"), default=os.environ.get("M32_INSTALL_SOURCE_KIND", "local_checkout"))
+    parser.add_argument("--source-url", default=os.environ.get("M32_INSTALL_SOURCE_URL"))
+    parser.add_argument("--source-ref", default=os.environ.get("M32_INSTALL_SOURCE_REF"))
+    parser.add_argument("--confirm-dependency-actions", action="store_true")
+    args = parser.parse_args(argv)
+
+    result = build_install_result(
+        surface=args.surface,
+        platform=args.platform,
+        dry_run=args.dry_run,
+        json_output=args.json_output,
+        confirmed_dependency_actions=args.confirm_dependency_actions,
+        home=os.environ.get("HOME"),
+        local_app_data=os.environ.get("LOCALAPPDATA"),
+        current_version=args.current_version,
+        target_version=args.target_version,
+        install_source=args.install_source,
+        source_url=args.source_url,
+        source_ref=args.source_ref,
+    )
+
+    if not args.dry_run:
+        if not result["installer_can_continue"]:
+            if args.json_output:
+                print(json.dumps(result, indent=2, sort_keys=True))
+            else:
+                _print_plain(args.surface, result, dry_run=args.dry_run)
+            return 1
+        result = perform_apply_install(args.surface, result)
+
+    if args.json_output:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        _print_plain(args.surface, result, dry_run=args.dry_run)
+    return 0 if result["ok"] else 1
+
+
+def perform_apply_install(surface: str, result: dict[str, Any]) -> dict[str, Any]:
+    from .lifecycle import render_lifecycle_guidance
+    from .mcp_guidance import render_mcp_guidance
+
+    try:
+        _apply_user_local_install(surface, result)
+    except OSError as exc:
+        lifecycle_guidance = render_lifecycle_guidance(surface=surface, install_status="partial_failure")
+        return {
+            **result,
+            "ok": False,
+            "status": "partial_failure",
+            "error_code": "APP_MATERIALIZATION_FAILED",
+            "message": f"partial_failure: app materialization failed before install success: {exc}",
+            "installer_can_continue": False,
+            "lifecycle_guidance": lifecycle_guidance,
+            "hardware_verified": False,
+            "production_live_ready": False,
+            "osc_writes_sent": 0,
+        }
+    except ValueError as exc:
+        lifecycle_guidance = render_lifecycle_guidance(surface=surface, install_status="failed")
+        return {
+            **result,
+            "ok": False,
+            "status": "failed",
+            "error_code": "INSTALL_BOUNDARY_REJECTED",
+            "message": str(exc),
+            "installer_can_continue": False,
+            "lifecycle_guidance": lifecycle_guidance,
+            "hardware_verified": False,
+            "production_live_ready": False,
+            "osc_writes_sent": 0,
+        }
+
+    status = "already_current" if result["status"] in {"fresh_install", "repair", "update"} else result["status"]
+    mcp_guidance = render_mcp_guidance(os_family="windows" if surface == "windows" else None)
+    lifecycle_guidance = render_lifecycle_guidance(
+        surface=surface,
+        install_status=status,
+    )
+    return {
+        **result,
+        "ok": True,
+        "status": status,
+        "path_updated": False,
+        "first_run_setup": {
+            "offered": True,
+            "interactive": False,
+            "attempted_path": "not_attempted",
+            "classification": None,
+            "osc_writes_sent": 0,
+            "hardware_verified": False,
+        },
+        "verification_guidance": {
+            "offered": True,
+            "commands": [
+                "m32-bridge health",
+                "m32-bridge setup",
+                "m32-bridge get-info",
+                "m32-bridge detect-device",
+                "m32-bridge doctor-runtime",
+            ],
+            "osc_writes_sent": 0,
+            "hardware_verified": False,
+            "production_live_ready": False,
+        },
+        "mcp_guidance": mcp_guidance,
+        "lifecycle_guidance": lifecycle_guidance,
+        "message": _message({**result, "status": status}),
+        "hardware_verified": False,
+        "production_live_ready": False,
+        "osc_writes_sent": 0,
+    }
+
+
+def build_install_result(
+    *,
+    surface: str,
+    platform: str | None = None,
+    dry_run: bool = True,
+    json_output: bool = False,
+    confirmed_dependency_actions: bool = False,
+    home: Path | str | None = None,
+    local_app_data: Path | str | None = None,
+    uv_state: RuntimeManagerState | None = None,
+    current_version: str | None = None,
+    target_version: str | None = None,
+    install_source: str = "local_checkout",
+    source_url: str | None = None,
+    source_ref: str | None = None,
+) -> dict[str, Any]:
+    surface_platform = platform or _detect_platform(surface)
+    app_exists, launcher_exists = _detect_existing_state(surface, home=home, local_app_data=local_app_data)
+    runtime = uv_state or _uv_state_from_environment()
+    uv_detected = runtime.uv_status in {"present", "installed_user_local"}
+    required_actions = [] if uv_detected else [_uv_required_action(surface, _dependency_target_root(surface, home, local_app_data))]
+
+    result = plan_dry_run_install(
+        platform=surface_platform,
+        home=home or os.environ.get("HOME"),
+        local_app_data=local_app_data or os.environ.get("LOCALAPPDATA"),
+        uv_state=runtime,
+        current_version=current_version,
+        target_version=target_version or VERSION,
+        app_exists=app_exists,
+        launcher_exists=launcher_exists,
+        partial_failure_marker=_partial_failure_marker(surface, home=home, local_app_data=local_app_data),
+    )
+
+    missing_uv = not uv_detected
+    if missing_uv:
+        result["status"] = "RUNTIME_SETUP_REQUIRED" if dry_run or json_output else "UV_MISSING"
+        result["ok"] = False
+        result["error_code"] = "RUNTIME_SETUP_REQUIRED" if dry_run or json_output else "UV_MISSING_CONFIRMATION_REQUIRED"
+    if result.get("status") == "partial_failure":
+        result["ok"] = False
+        result["error_code"] = result.get("error_code") or "PARTIAL_FAILURE_RECOVERY_REQUIRED"
+    result.update(
+        {
+            "install_source": install_source,
+            "source_url": source_url,
+            "source_ref": source_ref or target_version or VERSION,
+            "target_version": target_version or VERSION,
+            "uv_required": True,
+            "uv_detected": uv_detected,
+            "python_required": True,
+            "global_python_required": False,
+            "python_managed_by_uv": True,
+            "installer_can_continue": uv_detected and (not required_actions or confirmed_dependency_actions),
+            "confirmation_required": bool(required_actions),
+            "required_actions": required_actions,
+        }
+    )
+    result["lifecycle_guidance"] = _lifecycle_guidance(surface, result)
+    result["message"] = _message(result)
+    result["recommendations"] = _recommendations(surface, result)
+    _assert_user_local_result(surface, result)
+    return result
+
+
+def _lifecycle_guidance(surface: str, result: dict[str, Any]) -> dict[str, Any]:
+    from .lifecycle import render_lifecycle_guidance
+
+    return render_lifecycle_guidance(
+        surface=surface,
+        install_status=str(result.get("status") or "already_current"),
+        app_path=result.get("app_path"),
+        launcher_path=result.get("launcher_path"),
+    )
+
+
+def _detect_platform(surface: str) -> str:
+    if surface == "windows":
+        return "windows_powershell"
+    if _is_wsl():
+        return "wsl"
+    system = py_platform.system().lower()
+    if system == "darwin":
+        return "macos"
+    if _is_raspberry_pi_os():
+        return "raspberry_pi_os"
+    return "linux"
+
+
+def _is_wsl() -> bool:
+    text = ""
+    try:
+        text = Path("/proc/version").read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        pass
+    return "microsoft" in text.lower() or "WSL_DISTRO_NAME" in os.environ
+
+
+def _is_raspberry_pi_os() -> bool:
+    try:
+        os_release = Path("/etc/os-release").read_text(encoding="utf-8", errors="ignore").lower()
+    except OSError:
+        os_release = ""
+    return "raspbian" in os_release or "raspberry pi os" in os_release
+
+
+def _uv_state_from_environment() -> RuntimeManagerState:
+    if os.environ.get("M32_INSTALL_UV_BLOCKED") == "1":
+        return RuntimeManagerState(
+            uv_status="blocked",
+            manual_guidance="uv setup is blocked. Install uv in user space, then rerun the installer.",
+            error="UV_BLOCKED",
+        )
+    # Test-only override; production detection comes from the actual PATH.
+    if os.environ.get("M32_INSTALL_ASSUME_UV") == "installed_user_local":
+        return RuntimeManagerState(uv_status="installed_user_local")
+    return detect_uv_status(allow_user_install=False)
+
+
+def _detect_existing_state(surface: str, *, home: Path | str | None = None, local_app_data: Path | str | None = None) -> tuple[bool, bool]:
+    if surface == "windows":
+        base = Path(local_app_data or os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+        app = base / "M32Bridge" / "app"
+        launcher = base / "M32Bridge" / "bin" / "m32-bridge.cmd"
+    else:
+        home_path = Path(home or os.environ.get("HOME") or Path.home())
+        app = home_path / ".m32-bridge" / "app"
+        launcher = home_path / ".local" / "bin" / "m32-bridge"
+    return app.exists(), launcher.exists()
+
+
+def _partial_failure_marker(surface: str, *, home: Path | str | None = None, local_app_data: Path | str | None = None) -> bool:
+    if surface == "windows":
+        base = Path(local_app_data or os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+        return (base / "M32Bridge" / ".partial_failure").exists()
+    home_path = Path(home or os.environ.get("HOME") or Path.home())
+    return (home_path / ".m32-bridge" / ".partial_failure").exists()
+
+
+def _apply_user_local_install(surface: str, result: dict[str, Any]) -> None:
+    _assert_user_local_result(surface, result)
+    app_path = Path(result["app_path"])
+    launcher_path = Path(result["launcher_path"])
+    _materialize_app(app_path)
+    launcher_path.parent.mkdir(parents=True, exist_ok=True)
+    if surface == "windows":
+        launcher_path.write_text(
+            "@echo off\r\n"
+            f"set \"M32_BRIDGE_APP_DIR={app_path}\"\r\n"
+            f"set \"PYTHONPATH={app_path}\\src;%PYTHONPATH%\"\r\n"
+            "cd /d \"%M32_BRIDGE_APP_DIR%\"\r\n"
+            "uv run --project \"%M32_BRIDGE_APP_DIR%\" python -m m32_bridge.__main__ %*\r\n",
+            encoding="utf-8",
+        )
+    else:
+        launcher_path.write_text(
+            "#!/bin/sh\n"
+            f"APP_DIR='{app_path}'\n"
+            "cd \"$APP_DIR\"\n"
+            "PYTHONPATH=\"$APP_DIR/src${PYTHONPATH:+:$PYTHONPATH}\"\n"
+            "export M32_BRIDGE_APP_DIR=\"$APP_DIR\" PYTHONPATH\n"
+            "exec uv run --project \"$APP_DIR\" python -m m32_bridge.__main__ \"$@\"\n",
+            encoding="utf-8",
+        )
+        launcher_path.chmod(0o755)
+
+
+def _materialize_app(app_path: Path, *, source_root: Path | None = None) -> None:
+    source = source_root or _repo_root()
+    _assert_materialization_source(source)
+    app_path.mkdir(parents=True, exist_ok=True)
+    for filename in ("pyproject.toml", "uv.lock", "README.md"):
+        src = source / filename
+        if src.is_file():
+            shutil.copy2(src, app_path / filename)
+    _copy_tree_filtered(source / "src", app_path / "src")
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def _assert_materialization_source(source: Path) -> None:
+    required = [source / "pyproject.toml", source / "src" / "m32_bridge"]
+    missing = [str(path) for path in required if not path.exists()]
+    if missing:
+        raise OSError(f"materialization source missing required files: {', '.join(missing)}")
+
+
+def _copy_tree_filtered(source: Path, destination: Path) -> None:
+    if not source.exists():
+        raise OSError(f"required source tree missing: {source}")
+    destination.mkdir(parents=True, exist_ok=True)
+    for child in source.iterdir():
+        if _should_skip_materialized_path(child):
+            continue
+        target = destination / child.name
+        if child.is_dir():
+            _copy_tree_filtered(child, target)
+        elif child.is_file():
+            shutil.copy2(child, target)
+
+
+def _should_skip_materialized_path(path: Path) -> bool:
+    name = path.name
+    if name in {
+        ".git",
+        ".venv",
+        ".pytest_cache",
+        ".DS_Store",
+        "__pycache__",
+        "tests",
+        ".env",
+        ".env.local",
+        "config.local.yaml",
+        "config.yaml",
+    }:
+        return True
+    if name.endswith((".pyc", ".pyo")):
+        return True
+    return False
+
+
+def _dependency_target_root(surface: str, home: Path | str | None, local_app_data: Path | str | None) -> Path:
+    if surface == "windows":
+        return Path(local_app_data or os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+    return Path(home or os.environ.get("HOME") or Path.home())
+
+
+def _uv_required_action(surface: str, target_root: Path) -> dict[str, Any]:
+    if surface == "windows":
+        command_preview = "irm https://astral.sh/uv/install.ps1 -OutFile install-uv.ps1; inspect install-uv.ps1; run only after confirmation"
+        target_paths = [str(target_root / "M32Bridge" / "runtime" / "uv")]
+    else:
+        command_preview = "curl -LsSf https://astral.sh/uv/install.sh -o install-uv.sh; inspect install-uv.sh; run only after confirmation"
+        target_paths = [str(target_root / ".local" / "bin" / "uv")]
+    return {
+        "action_id": "INSTALL_UV_USER_LOCAL",
+        "title": "Install uv in user space",
+        "reason": "M32 Bridge uses uv to manage Python runtime dependencies without global Python or global py assumptions.",
+        "command_preview": command_preview,
+        "requires_confirmation": True,
+        "risk_level": "user_local",
+        "target_paths": target_paths,
+        "official_source_url": "https://docs.astral.sh/uv/getting-started/installation/",
+        "user_can_skip": False,
+    }
+
+
+def _assert_user_local_result(surface: str, result: dict[str, Any]) -> None:
+    paths = [Path(result["app_path"]), Path(result["launcher_path"]), Path(result.get("install_root") or result["app_path"])]
+    for action in result.get("required_actions") or []:
+        for target in action.get("target_paths", []):
+            paths.append(Path(target))
+        preview = action.get("command_preview", "").lower()
+        forbidden_preview = ["sudo", "runas", "start-process -verb runas", "rm -rf", "del /", "rmdir /s", "format "]
+        if any(token in preview for token in forbidden_preview):
+            raise ValueError("dependency action contains forbidden admin or destructive command")
+    for path in paths:
+        if _is_system_path(surface, path):
+            raise ValueError(f"system path rejected for user-local installer boundary: {path}")
+
+
+def _is_system_path(surface: str, path: Path) -> bool:
+    text = str(path)
+    lower = text.lower().replace("\\", "/")
+    if surface == "windows":
+        return lower.startswith("c:/windows") or lower.startswith("c:/program files")
+    return text in {"/", "/usr", "/usr/local", "/opt", "/etc", "/bin", "/sbin", "/var"} or lower.startswith(
+        ("/usr/", "/usr/local/", "/opt/", "/etc/", "/bin/", "/sbin/")
+    )
+
+
+def _message(result: dict[str, Any]) -> str:
+    state = result["status"]
+    if state == "fresh_install":
+        return "fresh_install planned for user-local app and launcher paths."
+    if state == "existing_install":
+        return "existing_install detected; inspect user-local files before changing them."
+    if state == "repair":
+        return "repair planned; restore missing user-local launcher without deleting saved config."
+    if state == "update":
+        return "update planned; preserve saved config unless the user changes it later."
+    if state == "already_current":
+        return "already_current; run m32-bridge health in a new terminal if PATH changed."
+    if state == "partial_failure":
+        return "partial_failure detected; use recovery guidance before reporting success."
+    if state == "failed":
+        return "failed; no silent success was reported."
+    if state == "UV_MISSING":
+        return "UV_MISSING: uv is required before install can continue; confirm guided action explicitly."
+    if state == "RUNTIME_SETUP_REQUIRED":
+        return "RUNTIME_SETUP_REQUIRED: uv is missing; review required_actions before applying install."
+    return "installer status is available."
+
+
+def _recommendations(surface: str, result: dict[str, Any]) -> list[str]:
+    common = [
+        "Run m32-bridge health after install.",
+        "Post-install verification commands: m32-bridge health, m32-bridge setup, m32-bridge get-info, m32-bridge detect-device, m32-bridge doctor-runtime.",
+        "Run m32-bridge setup later for the first-run TTY wizard.",
+        "Future first-run TTY wizard uses DXBMARK style; non-TTY output stays plain or JSON.",
+        "No /set, OSC writes, hardware verification, or production/live readiness is performed by install evidence.",
+        "Manual-copy MCP guidance: use m32-bridge mcp-server as a local stdio command; no Claude, ChatGPT, Gemini, Antigravity, Codex, VS Code, or Cursor config is written automatically.",
+        "Lifecycle guidance covers update, repair, and uninstall for user-local app and launcher paths; retain saved config by default.",
+    ]
+    if surface == "windows":
+        common.append("Use PowerShell irm / Invoke-RestMethod guidance; CMD usage is through m32-bridge.cmd after install.")
+    else:
+        common.append("Download with curl when available, wget fallback, or manual download; inspect before running.")
+    if result.get("uv_status") == "manual_action_required":
+        common.append("uv requires user-local setup guidance; global py is not required and confirmation is required.")
+    if result.get("status") == "partial_failure":
+        common.append("Recovery: repair the user-local app and launcher, or remove incomplete user-local files.")
+    return common
+
+
+def _print_plain(surface: str, result: dict[str, Any], *, dry_run: bool) -> None:
+    print("M32 Bridge installer status")
+    print(f"surface: {surface}")
+    print(f"mode: {'dry-run' if dry_run else 'apply'}")
+    print(f"status: {result['status']}")
+    print(f"version: {result.get('version', VERSION)}")
+    print(f"install_source: {result.get('install_source', 'local_checkout')}")
+    print(f"install_root: {result.get('install_root')}")
+    print(f"app_path: {result['app_path']}")
+    print(f"launcher_path: {result['launcher_path']}")
+    print("user_local: true")
+    print("admin_required=false")
+    print("requires_admin=false")
+    print("global_py_required=false")
+    print("hardware_verified=false")
+    print("production_live_ready=false")
+    print("osc_writes_sent=0")
+    lifecycle = result.get("lifecycle_guidance") or {}
+    if lifecycle:
+        print("lifecycle_guidance: update repair uninstall")
+        print(f"config_path: {lifecycle.get('config_path')}")
+        print("config_handling: retain saved config by default; remove only after explicit confirmation")
+    print(f"message: {result.get('message')}")
+    for recommendation in result.get("recommendations", []):
+        print(f"- {recommendation}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

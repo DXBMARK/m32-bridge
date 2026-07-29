@@ -45,6 +45,7 @@ def health() -> dict[str, Any]:
         "production_live_ready": False,
     }
     result["hardware_verified"] = False
+    result["production_live_ready"] = False
     return result
 
 
@@ -304,6 +305,43 @@ def detect_device_runtime(
     )
     payload.setdefault("data", {})["os_recommendations"] = _current_os_recommendations()
     return payload
+
+
+def get_info_runtime(
+    *,
+    host: str | None,
+    port: int | None,
+    timeout: float = 0.5,
+    probe_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if host is None:
+        resolution = resolve_runtime_config(cli_args={}, environ={}, allow_project_local=False)
+        payload = no_console_host_output(resolution)
+        payload["scan_attempted"] = False
+        payload["guessed_host"] = None
+        return payload
+    if port is None:
+        port = 10023
+    probe = probe_result or setup_info_probe(str(host).strip(), port, timeout=timeout)
+    connected = probe.get("udp_info_probe_result") == "CONNECTED"
+    return runtime_output(
+        ok=bool(connected),
+        status="CONNECTED" if connected else "NOT_CONNECTED",
+        error_code=None if connected else "NOT_CONNECTED",
+        message="Read /info from configured endpoint." if connected else "The configured endpoint did not respond to /info.",
+        configured_host=str(host).strip(),
+        configured_port=port,
+        attempted_path="/info",
+        latency_ms=probe.get("latency_ms"),
+        exception_type=probe.get("exception_type"),
+        response_address=probe.get("response_address"),
+        connected=connected,
+        data={"info_raw": probe.get("info_raw")},
+        recommendations=["Run m32-bridge setup if this endpoint is not the intended console."],
+        osc_writes_sent=0,
+        hardware_verified=False,
+        production_live_ready=False,
+    )
 
 
 def doctor_runtime_command(
@@ -567,18 +605,38 @@ def _run_command(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "doctor-runtime":
         return doctor_runtime_command(host=args.host, port=args.port, timeout=args.timeout)
     if args.command == "setup":
-        return setup_runtime(
+        from m32_bridge.installer.first_run import run_setup_probe
+
+        if args.host is None:
+            from m32_bridge.installer.first_run import interactive_wizard, non_tty_setup_response
+
+            if sys.stdin.isatty() and sys.stdout.isatty() and not args.json:
+                return interactive_wizard()
+            return non_tty_setup_response(environ=dict(os.environ))
+        return run_setup_probe(
             host=args.host,
             port=args.port,
             target_type=args.target_type,
             label=args.label,
             environment=args.environment,
-            save=not args.no_save,
-            confirm_save=args.yes,
+            confirm_save=(not args.no_save) and args.yes,
             config_path=args.config_path,
             config_scope=args.config_scope,
             timeout=args.timeout,
+            environ=dict(os.environ),
         )
+    if args.command == "install-status":
+        from m32_bridge.installer.verification import render_post_install_verification
+
+        return render_post_install_verification(environ=dict(os.environ), home=args.home, local_app_data=args.local_app_data)
+    if args.command == "verify-install":
+        from m32_bridge.installer.verification import render_post_install_verification
+
+        payload = render_post_install_verification(environ=dict(os.environ), home=args.home, local_app_data=args.local_app_data)
+        payload["status"] = "install_verified"
+        return payload
+    if args.command == "get-info":
+        return get_info_runtime(host=args.host, port=args.port, timeout=args.timeout)
     if args.command == "detect-device":
         return detect_device_runtime(
             host=args.host,
@@ -621,6 +679,16 @@ def _build_parser() -> argparse.ArgumentParser:
     runtime_parser.add_argument("--port", type=int, default=None)
     runtime_parser.add_argument("--timeout", type=float, default=0.5)
 
+    install_status_parser = subparsers.add_parser("install-status")
+    install_status_parser.add_argument("--json", action="store_true")
+    install_status_parser.add_argument("--home", type=Path, default=None)
+    install_status_parser.add_argument("--local-app-data", type=Path, default=None)
+
+    verify_install_parser = subparsers.add_parser("verify-install")
+    verify_install_parser.add_argument("--json", action="store_true")
+    verify_install_parser.add_argument("--home", type=Path, default=None)
+    verify_install_parser.add_argument("--local-app-data", type=Path, default=None)
+
     setup_parser = subparsers.add_parser("setup")
     setup_parser.add_argument("--host", default=None)
     setup_parser.add_argument("--port", type=int, default=None)
@@ -633,6 +701,12 @@ def _build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--yes", action="store_true")
     setup_parser.add_argument("--config-path", type=Path, default=None)
     setup_parser.add_argument("--config-scope", choices=("user", "project_dev_test"), default="user")
+
+    get_info_parser = subparsers.add_parser("get-info")
+    get_info_parser.add_argument("--host", default=None)
+    get_info_parser.add_argument("--port", type=int, default=None)
+    get_info_parser.add_argument("--timeout", type=float, default=0.5)
+    get_info_parser.add_argument("--json", action="store_true")
 
     detect_parser = subparsers.add_parser("detect-device")
     detect_parser.add_argument("--host", default=None)
@@ -796,4 +870,5 @@ def _base_result(control: str, status: str) -> dict[str, Any]:
         "approval_token_supported": False,
         "console_write": False,
         "hardware_verified": False,
+        "production_live_ready": False,
     }

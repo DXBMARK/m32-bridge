@@ -1,0 +1,419 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "M32 Bridge Installer Runtime Output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ok",
+    "status",
+    "platform",
+    "app_path",
+    "launcher_path",
+    "requires_admin",
+    "global_py_required",
+    "uv_status",
+    "osc_writes_sent",
+    "hardware_verified",
+    "production_live_ready",
+    "recommendations"
+  ],
+  "properties": {
+    "ok": {
+      "type": "boolean"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "fresh_install",
+        "existing_install",
+        "repair",
+        "update",
+        "already_current",
+        "partial_failure",
+        "failed",
+        "UV_MISSING",
+        "RUNTIME_SETUP_REQUIRED",
+        "first_run_setup_required",
+        "non_interactive_setup_required"
+      ]
+    },
+    "platform": {
+      "type": "string",
+      "enum": [
+        "macos",
+        "linux",
+        "wsl",
+        "windows_powershell",
+        "windows_cmd",
+        "raspberry_pi_os",
+        "unsupported"
+      ]
+    },
+    "app_path": {
+      "type": "string"
+    },
+    "launcher_path": {
+      "type": "string"
+    },
+    "requires_admin": {
+      "type": "boolean",
+      "const": false
+    },
+    "global_py_required": {
+      "type": "boolean",
+      "const": false
+    },
+    "uv_status": {
+      "type": "string",
+      "enum": [
+        "present",
+        "installed_user_local",
+        "blocked",
+        "manual_action_required"
+      ]
+    },
+    "first_run_setup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "offered",
+        "interactive",
+        "attempted_path",
+        "osc_writes_sent",
+        "hardware_verified"
+      ],
+      "properties": {
+        "offered": {
+          "type": "boolean"
+        },
+        "interactive": {
+          "type": "boolean"
+        },
+        "attempted_path": {
+          "type": "string",
+          "enum": [
+            "/info",
+            "not_attempted"
+          ]
+        },
+        "classification": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "osc_writes_sent": {
+          "type": "integer",
+          "const": 0
+        },
+        "hardware_verified": {
+          "type": "boolean",
+          "const": false
+        }
+      }
+    },
+    "osc_writes_sent": {
+      "type": "integer",
+      "const": 0
+    },
+    "hardware_verified": {
+      "type": "boolean",
+      "const": false
+    },
+    "production_live_ready": {
+      "type": "boolean",
+      "const": false
+    },
+    "version": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "install_source": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "github",
+        "github_raw",
+        "github_release_or_archive",
+        "local_checkout",
+        "release_archive",
+        "unknown",
+        null
+      ]
+    },
+    "path_updated": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "source_url": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "source_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "target_version": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "shell_profile": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "detected_shell": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "zsh",
+        "bash",
+        "fish",
+        "powershell",
+        "cmd",
+        "unknown",
+        null
+      ]
+    },
+    "wsl_distribution": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "architecture": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "install_root": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "user_local": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "const": true
+    },
+    "admin_required": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "const": false
+    },
+    "uv_required": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "uv_detected": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "python_required": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "global_python_required": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "const": false
+    },
+    "python_managed_by_uv": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "installer_can_continue": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "confirmation_required": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "required_actions": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action_id",
+          "title",
+          "reason",
+          "command_preview",
+          "requires_confirmation",
+          "risk_level",
+          "target_paths",
+          "official_source_url",
+          "user_can_skip"
+        ],
+        "properties": {
+          "action_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "command_preview": {
+            "type": "string"
+          },
+          "requires_confirmation": {
+            "type": "boolean",
+            "const": true
+          },
+          "risk_level": {
+            "type": "string",
+            "enum": [
+              "user_local"
+            ]
+          },
+          "target_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "official_source_url": {
+            "type": "string"
+          },
+          "user_can_skip": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "error_code": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "lifecycle_guidance": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "user_local",
+        "requires_admin",
+        "app_path",
+        "launcher_path",
+        "osc_writes_sent",
+        "hardware_verified",
+        "production_live_ready"
+      ],
+      "properties": {
+        "user_local": {
+          "type": "boolean",
+          "const": true
+        },
+        "requires_admin": {
+          "type": "boolean",
+          "const": false
+        },
+        "app_path": {
+          "type": "string"
+        },
+        "launcher_path": {
+          "type": "string"
+        },
+        "osc_writes_sent": {
+          "type": "integer",
+          "const": 0
+        },
+        "hardware_verified": {
+          "type": "boolean",
+          "const": false
+        },
+        "production_live_ready": {
+          "type": "boolean",
+          "const": false
+        }
+      },
+      "additionalProperties": true
+    },
+    "mcp_guidance": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array"
+        },
+        "manual_copy_only": {
+          "type": "boolean",
+          "const": true
+        },
+        "osc_writes_sent": {
+          "type": "integer",
+          "const": 0
+        },
+        "hardware_verified": {
+          "type": "boolean",
+          "const": false
+        },
+        "production_live_ready": {
+          "type": "boolean",
+          "const": false
+        }
+      },
+      "additionalProperties": true
+    },
+    "message": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "recommendations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

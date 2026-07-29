@@ -67,6 +67,21 @@ def test_setup_json_contract_for_invalid_host_returns_invalid_host():
     assert payload["osc_writes_sent"] == 0
 
 
+def test_setup_json_contract_for_whitespace_host_returns_invalid_host():
+    completed = _run_setup("--host", "   ", "--port", "10023", "--target-type", "unknown", "--no-save")
+
+    assert completed.returncode != 0
+    payload = _payload(completed)
+    assert payload["ok"] is False
+    assert payload["status"] == "INVALID_HOST"
+    assert payload["error_code"] == "INVALID_HOST"
+    assert payload["configured_host"] is None
+    assert payload["attempted_path"] == "/info"
+    assert payload["osc_writes_sent"] == 0
+    assert payload["hardware_verified"] is False
+    assert payload["production_live_ready"] is False
+
+
 def test_setup_json_contract_for_invalid_port_returns_invalid_port():
     completed = _run_setup("--host", "192.0.2.10", "--port", "70000", "--target-type", "unknown", "--no-save")
 
