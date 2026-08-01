@@ -127,12 +127,12 @@ def test_script_runtime_policy_parity_and_no_dependency_drift_commands():
     assert "Set-ExecutionPolicy" not in windows.replace("does not call Set-ExecutionPolicy", "")
     assert "process-scoped" in windows
     for text in (posix, windows, script_runtime):
-        assert "--frozen" in text
         assert "--no-build" in text
-        assert not re.search(r"uv(?:Path)?\s+run(?![^\n\r]*--frozen)", text)
-        assert not re.search(r"uv run(?![^\n\r]*--frozen)", text)
-    assert "--no-project" in posix
-    assert "--no-project" in windows
+    assert "--frozen" in script_runtime
+    assert '"${UV_BIN}" run --managed-python --python "${APPROVED_PYTHON_MINOR}" --no-build --no-project "$@"' in posix
+    assert "& $uvPath run --managed-python --python $ApprovedPythonMinor --no-build --no-project python @runtimeArgs" in windows
+    assert 'run --frozen --managed-python --python "${APPROVED_PYTHON_MINOR}" --no-build --no-project' not in posix
+    assert "run --frozen --managed-python --python $ApprovedPythonMinor --no-build --no-project" not in windows
     assert "uv.lock is required for reproducible frozen runtime execution" in posix
     assert "uv.lock is required for reproducible frozen runtime execution" in windows
     assert "uv.lock" in script_runtime

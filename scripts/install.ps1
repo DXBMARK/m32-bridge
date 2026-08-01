@@ -561,7 +561,7 @@ if ($null -ne $uvCommand) {
         $runtimeArgs += "--uv-bin"
         $runtimeArgs += $script:UvBin
     }
-    & $uvPath run --frozen --managed-python --python $ApprovedPythonMinor --no-build --no-project python @runtimeArgs
+    & $uvPath run --managed-python --python $ApprovedPythonMinor --no-build --no-project python @runtimeArgs
     } finally {
         if (-not [string]::IsNullOrEmpty($BootstrapSourceRoot)) {
             $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())

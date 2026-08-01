@@ -433,7 +433,8 @@ def test_posix_clean_host_reuses_new_uv_in_same_tty_process(tmp_path):
     calls = uv_log.read_text(encoding="utf-8")
     assert "status: already_current" in rendered
     assert expected_uv in calls
-    assert "run --frozen --managed-python --python 3.13 --no-build --no-project" in calls
+    assert "run --managed-python --python 3.13 --no-build --no-project" in calls
+    assert "run --frozen --managed-python --python 3.13 --no-build --no-project" not in calls
     assert "sync --frozen --managed-python --python 3.13 --no-build --no-install-project" in calls
     assert calls.count("run --frozen --managed-python --python 3.13 --no-build --no-sync") == 2
     assert "uv 0.12.1" in rendered
