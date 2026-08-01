@@ -285,6 +285,78 @@
       ],
       "additionalProperties": true
     },
+    "runtime_handoff": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "launcher_path",
+        "subcommand",
+        "installed_runtime",
+        "bootstrap_runtime_tty",
+        "implicit_sync"
+      ],
+      "properties": {
+        "launcher_path": {
+          "type": "string"
+        },
+        "subcommand": {
+          "type": "string",
+          "const": "run"
+        },
+        "installed_runtime": {
+          "type": "boolean",
+          "const": true
+        },
+        "bootstrap_runtime_tty": {
+          "type": "boolean",
+          "const": false
+        },
+        "implicit_sync": {
+          "type": "boolean",
+          "const": false
+        }
+      }
+    },
+    "verification_guidance": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "offered",
+        "commands",
+        "osc_writes_sent",
+        "hardware_verified",
+        "production_live_ready"
+      ],
+      "properties": {
+        "offered": {
+          "type": "boolean"
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "osc_writes_sent": {
+          "type": "integer",
+          "const": 0
+        },
+        "hardware_verified": {
+          "type": "boolean",
+          "const": false
+        },
+        "production_live_ready": {
+          "type": "boolean",
+          "const": false
+        }
+      }
+    },
     "platform_info": {
       "type": [
         "object",

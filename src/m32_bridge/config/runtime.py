@@ -20,6 +20,14 @@ class ValidationResult:
 
 
 @dataclass(frozen=True)
+class ConfigFileLoadResult:
+    values: dict[str, Any]
+    present: bool
+    error_code: str | None = None
+    message: str = ""
+
+
+@dataclass(frozen=True)
 class RuntimeConfig:
     host: str | None = None
     port: int | None = None
@@ -69,6 +77,11 @@ def default_project_config_path() -> Path:
 
 
 def validate_runtime_config(config: Mapping[str, Any]) -> ValidationResult:
+    target = _target(config)
+    host = config.get("host") if "host" in config else target.get("osc_host")
+    if host is not None and not isinstance(host, str):
+        return ValidationResult(ok=False, error_code="INVALID_HOST", message="host must be a string")
+
     target_type = str(config.get("intended_target_type", "unknown"))
     if target_type not in VALID_TARGET_TYPES:
         return ValidationResult(
@@ -76,8 +89,9 @@ def validate_runtime_config(config: Mapping[str, Any]) -> ValidationResult:
             error_code="INVALID_CONFIG",
             message=f"invalid intended_target_type: {target_type}",
         )
-    port = config.get("port")
-    if port is not None and _int_or_none(port) is None:
+    port = config.get("port") if "port" in config else target.get("osc_port")
+    normalized_port = _int_or_none(port)
+    if port is not None and (normalized_port is None or not 1 <= normalized_port <= 65535):
         return ValidationResult(ok=False, error_code="INVALID_PORT", message="invalid port")
     return ValidationResult(ok=True)
 
@@ -94,8 +108,26 @@ def resolve_runtime_config(
     env = dict(environ or {})
     user_path = user_config_path or default_user_config_path()
     project_path = project_config_path or default_project_config_path()
-    user_config = _load_config_file(user_path)
-    project_config = _load_config_file(project_path)
+    user_load = _load_config_file(user_path)
+    project_load = _load_config_file(project_path)
+    user_config = user_load.values
+    project_config = project_load.values
+
+    invalid_load = user_load if user_load.error_code else (project_load if allow_project_local and project_load.error_code else None)
+    if invalid_load is not None:
+        invalid_path = user_path if user_load.error_code else project_path
+        return ConfigResolution(
+            effective_host=None,
+            effective_port=None,
+            source_by_field={},
+            cli_args_present=bool(cli),
+            env_overrides_present=bool(env.get("M32_CONSOLE_HOST") or env.get("M32_CONSOLE_PORT")),
+            user_config_present=user_load.present,
+            project_local_config_present=project_load.present,
+            error_code="CONFIG_INVALID",
+            message=invalid_load.message or "Runtime config file is malformed.",
+            config_path=invalid_path,
+        )
 
     host: str | None = None
     port: int | None = None
@@ -104,8 +136,12 @@ def resolve_runtime_config(
     intended_target_type = "unknown"
     config_path: Path | None = None
     source_by_field: dict[str, str] = {}
+    validation_error: ValidationResult | None = None
 
     if allow_project_local and project_config:
+        project_validation = validate_runtime_config(project_config)
+        if not project_validation.ok:
+            validation_error = project_validation
         host = _config_host(project_config)
         port = _config_port(project_config)
         label = _string_or_none(project_config.get("label"))
@@ -123,6 +159,9 @@ def resolve_runtime_config(
             source_by_field["intended_target_type"] = "project_local_dev_test"
 
     if user_config:
+        user_validation = validate_runtime_config(user_config)
+        if not user_validation.ok:
+            validation_error = user_validation
         user_host = _config_host(user_config)
         user_port = _config_port(user_config)
         user_label = _string_or_none(user_config.get("label"))
@@ -146,7 +185,15 @@ def resolve_runtime_config(
             intended_target_type = user_target_type
             source_by_field["intended_target_type"] = "user_config"
 
-    env_host = _string_or_none(env.get("M32_CONSOLE_HOST"))
+    env_config: dict[str, Any] = {}
+    if "M32_CONSOLE_HOST" in env:
+        env_config["host"] = env["M32_CONSOLE_HOST"]
+    if "M32_CONSOLE_PORT" in env:
+        env_config["port"] = env["M32_CONSOLE_PORT"]
+    env_validation = validate_runtime_config(env_config)
+    if not env_validation.ok:
+        validation_error = env_validation
+    env_host = _host_or_none(env.get("M32_CONSOLE_HOST"))
     env_port = _int_or_none(env.get("M32_CONSOLE_PORT"))
     if env_host:
         host = env_host
@@ -155,7 +202,10 @@ def resolve_runtime_config(
         port = env_port
         source_by_field["port"] = "env"
 
-    cli_host = _string_or_none(cli.get("host"))
+    cli_validation = validate_runtime_config(cli)
+    if not cli_validation.ok:
+        validation_error = cli_validation
+    cli_host = _host_or_none(cli.get("host"))
     cli_port = _int_or_none(cli.get("port"))
     if cli_host:
         host = cli_host
@@ -169,17 +219,22 @@ def resolve_runtime_config(
         source_by_field.setdefault("port", "default")
 
     missing_host = not host
+    effective_values_valid = validation_error is None
     return ConfigResolution(
-        effective_host=host,
-        effective_port=port if not missing_host else None,
+        effective_host=host if effective_values_valid else None,
+        effective_port=port if effective_values_valid and not missing_host else None,
         source_by_field=source_by_field,
         cli_args_present=bool(cli),
         env_overrides_present=bool(env_host or env.get("M32_CONSOLE_PORT")),
-        user_config_present=user_path.exists(),
-        project_local_config_present=project_path.exists(),
+        user_config_present=user_load.present,
+        project_local_config_present=project_load.present,
         project_local_config_used=bool(allow_project_local and project_config and source_by_field.get("host") == "project_local_dev_test"),
-        error_code="NO_CONSOLE_HOST" if missing_host else None,
-        message="No console host is configured. Run m32-bridge setup." if missing_host else "",
+        error_code=(validation_error.error_code if validation_error else ("NO_CONSOLE_HOST" if missing_host else None)),
+        message=(
+            validation_error.message
+            if validation_error
+            else ("No console host is configured. Run m32-bridge setup." if missing_host else "")
+        ),
         effective_label=label,
         effective_environment=environment,
         effective_intended_target_type=intended_target_type,
@@ -265,15 +320,31 @@ def probe_info(*_args: Any, **_kwargs: Any) -> None:
     return None
 
 
-def _load_config_file(path: Path) -> dict[str, Any]:
+def _load_config_file(path: Path) -> ConfigFileLoadResult:
     if not path.exists():
-        return {}
+        return ConfigFileLoadResult(values={}, present=False)
     yaml = _yaml_module()
     try:
         loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
     except OSError:
-        return {}
-    return loaded if isinstance(loaded, dict) else {}
+        return ConfigFileLoadResult(values={}, present=True)
+    except yaml.YAMLError:
+        return ConfigFileLoadResult(
+            values={},
+            present=True,
+            error_code="CONFIG_INVALID",
+            message="Runtime config file is malformed.",
+        )
+    if loaded is None:
+        return ConfigFileLoadResult(values={}, present=True)
+    if not isinstance(loaded, dict):
+        return ConfigFileLoadResult(
+            values={},
+            present=True,
+            error_code="CONFIG_INVALID",
+            message="Runtime config file must contain a mapping.",
+        )
+    return ConfigFileLoadResult(values=loaded, present=True)
 
 
 def _yaml_module() -> Any:
@@ -288,11 +359,12 @@ def _yaml_module() -> Any:
 
 
 def _config_host(config: Mapping[str, Any]) -> str | None:
-    return _string_or_none(config.get("host")) or _string_or_none(_target(config).get("osc_host"))
+    return _host_or_none(config.get("host")) or _host_or_none(_target(config).get("osc_host"))
 
 
 def _config_port(config: Mapping[str, Any]) -> int | None:
-    return _int_or_none(config.get("port")) or _int_or_none(_target(config).get("osc_port"))
+    value = config.get("port") if "port" in config else _target(config).get("osc_port")
+    return _int_or_none(value)
 
 
 def _target(config: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -307,12 +379,25 @@ def _string_or_none(value: object) -> str | None:
     return text or None
 
 
+def _host_or_none(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
+
+
 def _int_or_none(value: object) -> int | None:
     if value is None:
         return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if not isinstance(value, str):
+        return None
     try:
-        return int(value)
-    except (TypeError, ValueError):
+        return int(value.strip())
+    except ValueError:
         return None
 
 

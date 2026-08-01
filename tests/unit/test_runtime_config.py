@@ -52,6 +52,34 @@ def test_runtime_config_rejects_invalid_target_type():
     assert "intended_target_type" in result.message
 
 
+@pytest.mark.parametrize("port", [0, -1, 65536, "not-a-port"])
+def test_runtime_config_rejects_invalid_port_values(port):
+    runtime = _runtime_config_module()
+
+    result = runtime.validate_runtime_config({"host": "console.example", "port": port})
+
+    assert result.ok is False
+    assert result.error_code == "INVALID_PORT"
+
+
+@pytest.mark.parametrize("host", [["console.example"], {"host": "console.example"}, True, 123])
+def test_runtime_config_rejects_non_string_host(host):
+    runtime = _runtime_config_module()
+
+    result = runtime.validate_runtime_config({"host": host, "port": 10023})
+
+    assert result.ok is False
+    assert result.error_code == "INVALID_HOST"
+
+
+def test_runtime_config_accepts_numeric_string_port_consistently():
+    runtime = _runtime_config_module()
+
+    result = runtime.validate_runtime_config({"host": "console.example", "port": "10023"})
+
+    assert result.ok is True
+
+
 def test_runtime_config_source_metadata_identifies_user_config_values(tmp_path: Path):
     runtime = _runtime_config_module()
     config_path = tmp_path / "runtime.yaml"
@@ -63,6 +91,26 @@ def test_runtime_config_source_metadata_identifies_user_config_values(tmp_path: 
     assert resolved.effective_port == 10024
     assert resolved.source_by_field == {"host": "user_config", "port": "user_config"}
     assert resolved.user_config_present is True
+
+
+def test_resolve_malformed_yaml_returns_config_invalid_without_exception(tmp_path: Path):
+    runtime = _runtime_config_module()
+    config_path = tmp_path / "runtime.yaml"
+    config_path.write_text("host: [unterminated\n", encoding="utf-8")
+
+    resolved = runtime.resolve_runtime_config(
+        cli_args={},
+        environ={},
+        user_config_path=config_path,
+        project_config_path=tmp_path / "missing-project.yaml",
+        allow_project_local=False,
+    )
+
+    assert resolved.error_code == "CONFIG_INVALID"
+    assert resolved.config_path == config_path
+    assert resolved.effective_host is None
+    assert resolved.effective_port is None
+    assert "unterminated" not in resolved.message
 
 
 def test_save_runtime_config_atomic_success_uses_same_directory_and_leaves_no_temp(tmp_path: Path):

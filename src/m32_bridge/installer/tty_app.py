@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, TextIO
 import tomllib
 
+from m32_bridge.runtime_preconditions import evaluate_console_precondition
+
 
 BG_HEX = "#243947"
 PRIMARY_HEX = "#F97E1A"
@@ -37,6 +39,8 @@ INSTALLER_NAME = "X32-Bridge MCP Installer"
 PACKAGE_NAME = "m32-mcp-bridge"
 CLI_NAME = "m32-bridge"
 BANNER = "X32-BRIDGE MCP INSTALLER"
+RUNTIME_BANNER = "X32-BRIDGE MCP"
+RUNTIME_SUBTITLE = "RUNTIME CONSOLE"
 POWERED_BY = "Powered by DXBMARK LLC"
 CONTACT_URL = "https://www.dxbmark.com"
 CONTACT_EMAIL = "support@dxbmark.com"
@@ -50,18 +54,39 @@ DXBMARK_ASCII_LOGO = r"""
 # |____/_/\_\____/|_|  |_/_/   \_\_| \_\_|\_\ dxbmark.com
 """.strip("\n")
 
+def _command(
+    desc: str,
+    scope: str,
+    shell: str,
+    *,
+    requires_console_config: bool = False,
+    read_only: bool = True,
+    setup_command: bool = False,
+    safe_to_retry_after_setup: bool = False,
+) -> dict[str, Any]:
+    return {
+        "desc": desc,
+        "scope": scope,
+        "shell": shell,
+        "requires_console_config": requires_console_config,
+        "read_only": read_only,
+        "setup_command": setup_command,
+        "safe_to_retry_after_setup": safe_to_retry_after_setup,
+    }
+
+
 COMMAND_REGISTRY = {
-    "/health": {"desc": "Check runtime and installation readiness", "scope": "local-only", "shell": "m32-bridge health"},
-    "/setup": {"desc": "Configure a known console endpoint", "scope": "network read-only; may save config", "shell": "m32-bridge setup"},
-    "/get-info": {"desc": "Read information from the configured endpoint", "scope": "network read-only", "shell": "m32-bridge get-info"},
-    "/verify-device": {"desc": "Verify the configured endpoint; no network scan", "scope": "network read-only", "shell": "m32-bridge detect-device"},
-    "/doctor-runtime": {"desc": "Diagnose local runtime issues", "scope": "local-only", "shell": "m32-bridge doctor-runtime"},
-    "/mcp-config": {"desc": "Generate safe MCP client configuration and setup guidance", "scope": "local-only", "shell": "m32-bridge mcp-config"},
-    "/status": {"desc": "Show or refresh installer status", "scope": "local; optional bounded source refresh", "shell": "installer-only"},
-    "/contact": {"desc": "Show product information, version, publisher and support", "scope": "local-only", "shell": "installer-only"},
-    "/help": {"desc": "Show the responsive command guide", "scope": "local-only", "shell": "sh scripts/install.sh --help"},
-    "/clear": {"desc": "Clear and redraw the installer screen", "scope": "local-only", "shell": "installer-only"},
-    "/exit": {"desc": "Exit and restore the terminal", "scope": "local-only", "shell": "installer-only"},
+    "/health": _command("Check runtime and installation readiness", "local-only", "m32-bridge health"),
+    "/setup": _command("Configure a known console endpoint", "network read-only; may save config", "m32-bridge setup", read_only=False, setup_command=True),
+    "/get-info": _command("Read information from the configured endpoint", "network read-only", "m32-bridge get-info", requires_console_config=True, safe_to_retry_after_setup=True),
+    "/verify-device": _command("Verify the configured endpoint; no network scan", "network read-only", "m32-bridge detect-device", requires_console_config=True, safe_to_retry_after_setup=True),
+    "/doctor-runtime": _command("Diagnose local runtime issues", "local-only", "m32-bridge doctor-runtime"),
+    "/mcp-config": _command("Generate safe MCP client configuration and setup guidance", "local-only", "m32-bridge mcp-config"),
+    "/status": _command("Show runtime status", "local-only", "m32-bridge health"),
+    "/contact": _command("Show product information, version, publisher and support", "local-only", "runtime-only"),
+    "/help": _command("Show the responsive command guide", "local-only", "m32-bridge --help"),
+    "/clear": _command("Clear and redraw the current screen", "local-only", "runtime-only"),
+    "/exit": _command("Exit and restore the terminal", "local-only", "runtime-only"),
 }
 SHELL_ALIASES = {
     "m32-bridge health": "/health",
@@ -209,6 +234,7 @@ class SetupState:
     source_by_field: dict[str, str] | None = None
     config_path: str | None = None
     target_type_index: int = 2
+    configuration_unreadable: bool = False
 
     def __post_init__(self) -> None:
         if self.values is None:
@@ -360,7 +386,7 @@ def render_tty_installer(surface: str, result: dict[str, Any], *, dry_run: bool,
     colors = Colors(False)
     body = [render_semantic_row(row, colors) for row in _body_rows(surface, result, dry_run=dry_run)]
     footer = render_footer_status(result, color=False)
-    return "\n".join([_render_header(colors), "", *body, "", footer])
+    return "\n".join([_render_header(colors, tty_mode=str(result.get("tty_mode") or "installer")), "", *body, "", footer])
 
 
 def terminal_size(size_provider: Any | None = None) -> tuple[int, int]:
@@ -494,11 +520,13 @@ def render_frame(
 ) -> tuple[list[str], list[str], str]:
     colors = Colors(color)
     content_width = max(width - 1, 20)
-    header_raw = _header_lines(colors, width=width)
+    tty_mode = str(result.get("tty_mode") or "installer")
+    header_raw = _header_lines(colors, width=width, tty_mode=tty_mode)
     max_header = max(1, min(len(header_raw), max(height - 3, 1)))
     header = [pad_ansi_line(line, content_width, color=color) for line in header_raw[:max_header]]
     body_height = max(height - len(header) - 1, 0)
-    command_text = f"root/ $ {input_buffer}" if input_buffer else "root/ $ "
+    prompt = "m32-bridge >" if tty_mode == "runtime" else "root/ $"
+    command_text = f"{prompt} {input_buffer}" if input_buffer else f"{prompt} "
     overlay_lines: list[str] = []
     panel_footer: str | None = None
     if input_buffer.startswith("/"):
@@ -632,8 +660,8 @@ _EQUALS_FIELDS = {
 
 def render_status_text(result: dict[str, Any], *, color: bool = False) -> str:
     colors = Colors(color)
-    from m32_bridge.config.runtime import resolve_runtime_config
     from m32_bridge.installer.runtime_manager import inspect_runtime, platform_information
+    from m32_bridge.runtime_preconditions import evaluate_console_precondition
 
     platform_info = result.get("platform_info") or platform_information()
     runtime = result.get("runtime_info") or inspect_runtime()
@@ -648,7 +676,13 @@ def render_status_text(result: dict[str, Any], *, color: bool = False) -> str:
             "last_checked": "not_checked",
         },
     )
-    console = resolve_runtime_config(cli_args={}, environ=dict(os.environ), allow_project_local=False)
+    console_precondition = evaluate_console_precondition()
+    console = console_precondition.resolution
+    console_configured = console_precondition.state == "ready"
+    console_invalid = console_precondition.state == "config_invalid"
+    console_source = dict(console.source_by_field) if console is not None else {}
+    console_label = console.effective_label if console_configured and console is not None else None
+    console_target_type = console.effective_intended_target_type if console_configured and console is not None else "unknown"
     dry_run = bool(result.get("dry_run", result.get("status") in {"RUNTIME_SETUP_REQUIRED", "fresh_install"}))
     mode = "dry-run" if dry_run else "apply"
     mode_note = "Preview only; no install files are written." if dry_run else "User-local files may be written after confirmation."
@@ -706,14 +740,21 @@ def render_status_text(result: dict[str, Any], *, color: bool = False) -> str:
         "",
         _section_title("CONSOLE CONFIGURATION", colors),
         _separator("-" * 60, colors),
-        _status_field_colored("Configured", _bool(bool(console.effective_host)), "success" if console.effective_host else "muted", colors),
-        _status_field_colored("Host", console.effective_host or "not_configured", "normal" if console.effective_host else "muted", colors),
-        _status_field_colored("Port", console.effective_port or "not_configured", "normal" if console.effective_host else "muted", colors),
-        _status_field_colored("Host source", render_config_source_name(console.source_by_field.get("host")), "muted", colors),
-        _status_field_colored("Port source", render_config_source_name(console.source_by_field.get("port")), "muted", colors),
-        _status_field_colored("Config file", _config_path_text(console.config_path), "muted", colors),
-        _status_field_colored("Label", console.effective_label or "not set", "normal" if console.effective_label else "muted", colors),
-        _status_field_colored("Intended target", display_target_type(console.effective_intended_target_type), "normal", colors),
+        _status_field_colored("Configured", _bool(console_configured), "success" if console_configured else ("error" if console_invalid else "muted"), colors),
+        _status_field_colored("Configuration state", console_precondition.state, "error" if console_invalid else ("success" if console_configured else "warning"), colors),
+        _status_field_colored("Host", console_precondition.effective_host or "not_configured", "normal" if console_configured else "muted", colors),
+        _status_field_colored("Port", console_precondition.effective_port or "not_configured", "normal" if console_configured else "muted", colors),
+        _status_field_colored("Host source", render_config_source_name(console_source.get("host")), "muted", colors),
+        _status_field_colored("Port source", render_config_source_name(console_source.get("port")), "muted", colors),
+        _status_field_colored("Config file", _config_path_text(console_precondition.config_path), "muted", colors),
+        _status_field_colored("Label", console_label or "not set", "normal" if console_label else "muted", colors),
+        _status_field_colored("Intended target", display_target_type(console_target_type), "normal", colors),
+        _status_field_colored(
+            "Next action",
+            "none" if console_configured else ("Repair the saved configuration or run /setup" if console_invalid else "Run /setup"),
+            "muted" if console_configured else ("error" if console_invalid else "command"),
+            colors,
+        ),
         _status_field_colored("Connection verified", "no", "success", colors),
         _status_field_colored("Last connection state", result.get("console_connection_status") or "not_checked", _semantic_style_for_value(result.get("console_connection_status") or "not_checked"), colors),
         "  Saved configuration only. This is not device discovery.",
@@ -902,6 +943,38 @@ def execute_installer_command(
     input_func: Callable[[str], str] | None = None,
     width: int | None = None,
 ) -> tuple[str, bool]:
+    try:
+        return _execute_command_impl(
+            command,
+            result,
+            color=color,
+            input_func=input_func,
+            width=width,
+        )
+    except Exception as exc:
+        if result.get("tty_mode") != "runtime":
+            raise
+        from .runtime_faults import write_runtime_diagnostic_log
+
+        error_code = _classify_runtime_exception(exc)
+        log_path = None
+        if error_code == "COMMAND_FAILED":
+            app_path = Path(str(result.get("app_path") or Path.home() / ".m32-bridge" / "app"))
+            try:
+                log_path = write_runtime_diagnostic_log(app_path.parent / "logs", exc)
+            except Exception:
+                log_path = None
+        return render_runtime_command_failure(error_code, log_path=log_path, color=color), False
+
+
+def _execute_command_impl(
+    command: str,
+    result: dict[str, Any],
+    *,
+    color: bool = False,
+    input_func: Callable[[str], str] | None = None,
+    width: int | None = None,
+) -> tuple[str, bool]:
     action = parse_installer_command(command)
     if action is None:
         return "Unknown command. Type / to view allowed commands.", False
@@ -910,8 +983,12 @@ def execute_installer_command(
     if action == "/":
         return render_command_picker("/", color=color), False
     if action == "/help":
+        if result.get("tty_mode") == "runtime":
+            return runtime_help_text(color=color), False
         return installer_help_text(color=color, width=width or terminal_size()[0]), False
     if action == "/contact":
+        if result.get("tty_mode") == "runtime":
+            return runtime_contact_text(color=color), False
         return installer_contact_text(color=color, width=width), False
     if action == "/mcp-config":
         from m32_bridge.installer.mcp_guidance import render_mcp_guidance, render_mcp_guidance_text
@@ -919,16 +996,23 @@ def execute_installer_command(
         payload = render_mcp_guidance(environ=dict(os.environ), version=application_version())
         return _style_panel_text(render_mcp_guidance_text(payload, width=width or terminal_size()[0]), color=color), False
     if action == "/status":
+        if result.get("tty_mode") == "runtime":
+            return render_runtime_health_panel(result, color=color), False
         return render_status_text(result, color=color), False
     if action == "/status refresh":
+        if result.get("tty_mode") == "runtime":
+            return render_runtime_health_panel(result, color=color), False
         refresh_source_status(result, force=True)
         return render_status_text(result, color=color), False
     if action == "/clear":
         surface = "windows" if str(result.get("platform", "")).startswith("windows") else "posix"
         return render_tty_installer(surface, result, dry_run=bool(result.get("dry_run", True)), color=color), False
     if action == "/exit":
-        return "Installer exited. No dependency or console write action was taken.", True
+        message = "Runtime Console exited." if result.get("tty_mode") == "runtime" else "Installer exited. No dependency or console write action was taken."
+        return message, True
     if action == "/health":
+        if result.get("tty_mode") == "runtime":
+            return render_runtime_health_panel(result, color=color), False
         from m32_bridge.cli import health
 
         payload = health()
@@ -936,7 +1020,7 @@ def execute_installer_command(
             {
                 "runtime": _local_runtime_payload(result),
                 "osc_writes_sent": 0,
-                "network_scan": False,
+                "network_scan": "not_run",
                 "console_probe": "not_run",
             }
         )
@@ -1076,12 +1160,15 @@ def _execute_setup_payload(
 
 
 def _execute_console_read(action: str, result: dict[str, Any], *, color: bool = False) -> str:
-    from m32_bridge.cli import detect_device_runtime, get_info_runtime
-    from m32_bridge.config.runtime import resolve_runtime_config
-
-    resolution = resolve_runtime_config(cli_args={}, environ=dict(os.environ), allow_project_local=False)
-    if not resolution.effective_host:
-        return "Run /setup first. No configured endpoint is available."
+    precondition = evaluate_console_precondition()
+    if precondition.state == "config_invalid":
+        return render_runtime_command_failure("CONFIG_INVALID", log_path=None, color=color)
+    if precondition.state == "setup_required":
+        return render_setup_required_panel(action, color=color)
+    resolution = precondition.resolution
+    if resolution is None:
+        return render_runtime_command_failure("CONFIG_INVALID", log_path=None, color=color)
+    get_info_runtime, detect_device_runtime = _load_console_command_handlers()
     if action == "/get-info":
         payload = get_info_runtime(host=resolution.effective_host, port=resolution.effective_port)
         title = "GET INFO"
@@ -1103,10 +1190,101 @@ def _execute_console_read(action: str, result: dict[str, Any], *, color: bool = 
     payload["osc_writes_sent"] = 0
     payload["hardware_verified"] = bool(payload.get("hardware_verified") is True and payload.get("classification") == "HARDWARE_VERIFIED")
     payload["production_live_ready"] = False
+    if result.get("tty_mode") == "runtime" and not payload.get("connected"):
+        runtime_error = _classify_runtime_payload_failure(payload)
+        payload["error_code"] = runtime_error
+        payload["status"] = runtime_error
     result["console_connection_status"] = "reachable" if payload.get("connected") else "unreachable"
     if action == "/get-info":
         return render_get_info_panel(payload, color=color)
     return render_verify_device_panel(payload, color=color)
+
+
+def _load_console_command_handlers() -> tuple[Callable[..., dict[str, Any]], Callable[..., dict[str, Any]]]:
+    from m32_bridge.cli import detect_device_runtime, get_info_runtime
+
+    return get_info_runtime, detect_device_runtime
+
+
+def render_setup_required_panel(command: str, *, allow_setup_chain: bool = True, color: bool = False) -> str:
+    return _panel(
+        "SETUP REQUIRED",
+        [
+            (
+                "PRECONDITION",
+                [
+                    ("Error code", "SETUP_REQUIRED", "warning"),
+                    ("Command", command, "command"),
+                    ("Attempted path", "not_attempted", "success"),
+                ],
+            ),
+            (
+                "SAFETY",
+                [
+                    ("Console probe", "not_run", "success"),
+                    ("Network scan", "not_run", "success"),
+                    ("OSC writes", 0, "success"),
+                ],
+            ),
+        ],
+        notes=(
+            [
+                "A console endpoint has not been configured.",
+                f"Run /setup before using {command}.",
+                "Press Enter to start setup or ESC to cancel.",
+            ]
+            if allow_setup_chain
+            else [
+                "A console endpoint has not been configured.",
+                f"Run /setup before using {command}.",
+                "This command is not eligible for automatic retry after setup.",
+            ]
+        ),
+        color=color,
+    )
+
+
+def _classify_runtime_exception(exc: BaseException) -> str:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    if isinstance(exc, TimeoutError) or "timeout" in text:
+        return "CONNECTION_TIMEOUT"
+    if isinstance(exc, ConnectionRefusedError) or "connection refused" in text:
+        return "CONNECTION_REFUSED"
+    if isinstance(exc, socket.gaierror) or "name resolution" in text or "getaddrinfo" in text:
+        return "DNS_RESOLUTION_FAILED"
+    if "device" in text and "respond" in text:
+        return "DEVICE_NOT_RESPONDING"
+    if "config" in text and "not found" in text:
+        return "CONFIG_NOT_FOUND"
+    if "config" in text and "invalid" in text:
+        return "CONFIG_INVALID"
+    return "COMMAND_FAILED"
+
+
+def _classify_runtime_payload_failure(payload: dict[str, Any]) -> str:
+    text = " ".join(
+        str(payload.get(key) or "")
+        for key in ("error_code", "status", "exception_type", "message")
+    ).lower()
+    if "timeout" in text:
+        return "CONNECTION_TIMEOUT"
+    if "refused" in text:
+        return "CONNECTION_REFUSED"
+    if "dns" in text or "gaierror" in text or "name resolution" in text:
+        return "DNS_RESOLUTION_FAILED"
+    return "DEVICE_NOT_RESPONDING"
+
+
+def render_runtime_command_failure(error_code: str, *, log_path: Path | None, color: bool = False) -> str:
+    rows = [("Error code", error_code, "warning" if error_code != "COMMAND_FAILED" else "error")]
+    if error_code == "COMMAND_FAILED":
+        rows.append(("Diagnostic log", str(log_path) if log_path is not None else "unavailable", "muted"))
+    return _panel(
+        "COMMAND ERROR",
+        [("RESULT", rows), ("SAFETY", [("OSC writes", 0, "success"), ("Network scan", "not_run", "success")])],
+        notes=["The command could not be completed. Runtime Console is still available."],
+        color=color,
+    )
 
 
 def _local_runtime_payload(result: dict[str, Any]) -> dict[str, Any]:
@@ -1128,6 +1306,44 @@ def _setup_view_text() -> str:
             "  CANCEL or any other confirmation performs no network activity",
             "  No guessing. No subnet scan. No OSC writes.",
         ]
+    )
+
+
+def runtime_help_text(*, color: bool = False) -> str:
+    colors = Colors(color)
+    lines = [
+        _section_title("RUNTIME CONSOLE HELP", colors),
+        _separator("=" * 60, colors),
+        "",
+        _section_title("COMMANDS", colors),
+        _separator("-" * 60, colors),
+    ]
+    for command in _PICKER_ORDER:
+        metadata = COMMAND_REGISTRY[command]
+        lines.append(f"  {colors.PRIMARY}{command:<16}{colors.RESET_BG} {colors.TEXT}{metadata['desc']}{colors.RESET_BG}")
+    lines.extend(
+        [
+            "",
+            _section_title("SAFETY", colors),
+            _separator("-" * 60, colors),
+            "  Commands requiring a console endpoint stop at SETUP_REQUIRED.",
+            "  No host guessing, network scan, or OSC writes are performed.",
+            "",
+            f"{colors.MUTED}End of Runtime Console help{colors.RESET_BG}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def runtime_contact_text(*, color: bool = False) -> str:
+    return _panel(
+        "RUNTIME CONSOLE",
+        [
+            ("PRODUCT", [("Name", PRODUCT_NAME, "normal"), ("Version", application_version(), "normal")]),
+            ("SUPPORT", [("Website", CONTACT_URL, "muted"), ("Email", CONTACT_EMAIL, "muted"), ("Phone / WhatsApp", CONTACT_PHONE, "muted")]),
+        ],
+        notes=["Powered by DXBMARK LLC"],
+        color=color,
     )
 
 
@@ -1180,7 +1396,11 @@ def _setup_state_lines(state: SetupState, *, color: bool = False) -> list[str]:
         f"{colors.PRIMARY}{colors.BOLD}SETUP CONSOLE{colors.RESET_BG}                                     {colors.ACCENT}Step {step}/5{colors.RESET_BG}",
         _separator("=" * 60, colors),
         "",
-        "Existing configuration found" if current_values.get("host") else "No existing console endpoint is configured.",
+        (
+            "Existing configuration is unreadable. Enter safe replacement values."
+            if state.configuration_unreadable
+            else ("Existing configuration found" if current_values.get("host") else "No existing console endpoint is configured.")
+        ),
         "",
         _status_field_colored("Config file", _config_path_text(state.config_path), "muted", colors),
         _status_field_colored("Host source", render_config_source_name((state.source_by_field or {}).get("host")), "muted", colors),
@@ -1381,6 +1601,61 @@ def render_health_panel(payload: dict[str, Any], *, color: bool = False) -> str:
             ),
         ],
         notes=[payload.get("message") or ("Local runtime is healthy." if ok else "Review required actions in /status.")],
+        color=color,
+    )
+
+
+def render_runtime_health_panel(result: dict[str, Any], *, color: bool = False) -> str:
+    precondition = evaluate_console_precondition()
+    configured = precondition.configured
+    invalid = precondition.state == "config_invalid"
+    runtime = result.get("runtime_info") if isinstance(result.get("runtime_info"), dict) else {}
+    result["console_configured"] = configured
+    result["console_precondition_state"] = precondition.state
+    result.setdefault("console_connection_status", "not_checked")
+    readiness_rows = [
+        ("Console configured", _bool(configured), "success" if configured else "warning"),
+        ("Console connection", "not_checked", "muted"),
+        ("Operational readiness", precondition.state, "error" if invalid else ("success" if configured else "warning")),
+        (
+            "Next action",
+            "none" if configured else ("Repair the saved configuration or run /setup" if invalid else "Run /setup to configure a console endpoint"),
+            "muted" if configured else ("error" if invalid else "command"),
+        ),
+    ]
+    if invalid:
+        readiness_rows.insert(0, ("Error code", "CONFIG_INVALID", "error"))
+    return _panel(
+        "HEALTH",
+        [
+            (
+                "APPLICATION RUNTIME",
+                [
+                    ("Application runtime", "healthy", "success"),
+                    ("Managed Python", "ready", "success"),
+                    ("Python version", runtime.get("managed_python_version") or runtime.get("python_version") or "3.13", "success"),
+                    ("Frozen launcher", "enabled", "success"),
+                ],
+            ),
+            (
+                "CONSOLE READINESS",
+                readiness_rows,
+            ),
+            (
+                "SAFETY",
+                [
+                    ("Attempted path", "not_attempted", "success"),
+                    ("Console probe", "not_run", "success"),
+                    ("Network scan", "not_run", "success"),
+                    ("OSC writes", 0, "success"),
+                ],
+            ),
+        ],
+        notes=[
+            "Application runtime is healthy. The saved console configuration is invalid."
+            if invalid
+            else "Application runtime is healthy. Console setup is tracked separately."
+        ],
         color=color,
     )
 
@@ -1900,6 +2175,87 @@ class TTYSession:
         self.stream.flush()
 
 
+def _m32_bridge_module_path() -> Path:
+    import m32_bridge
+
+    return Path(str(m32_bridge.__file__)).resolve()
+
+
+def verify_runtime_import_provenance(environ: dict[str, str] | None = None) -> dict[str, Any]:
+    environment = dict(os.environ if environ is None else environ)
+    import mcp
+    import pydantic
+    import yaml
+
+    module_path = _m32_bridge_module_path()
+    if any(part.startswith("m32-bridge-bootstrap-") for part in module_path.parts):
+        raise RuntimeError("Installed runtime resolved m32_bridge from bootstrap source.")
+    installed_marker = environment.get("M32_BRIDGE_INSTALLED_RUNTIME") == "1"
+    app_value = environment.get("M32_BRIDGE_APP_DIR")
+    if installed_marker:
+        if not app_value:
+            raise RuntimeError("Installed runtime marker is missing the application directory.")
+        app_path = Path(app_value).expanduser().resolve()
+        try:
+            module_path.relative_to(app_path / "src")
+        except ValueError:
+            raise RuntimeError("Installed runtime did not import m32_bridge from the installed application.") from None
+    return {
+        "m32_bridge_path": str(module_path),
+        "yaml_available": bool(yaml.__file__),
+        "mcp_available": bool(mcp.__file__),
+        "pydantic_available": bool(pydantic.__file__),
+        "installed_runtime": installed_marker,
+        "bootstrap_source": False,
+    }
+
+
+def run_runtime_tty() -> int:
+    try:
+        provenance = verify_runtime_import_provenance()
+    except Exception:
+        print("Runtime Console could not verify the installed application. Run m32-bridge health.", file=sys.stderr)
+        return 1
+    from m32_bridge.installer.runtime_manager import local_runtime_diagnostics
+
+    precondition = evaluate_console_precondition()
+    app_path = Path(os.environ.get("M32_BRIDGE_APP_DIR") or _m32_bridge_module_path().parents[2])
+    default_launcher = (
+        Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "M32Bridge" / "bin" / "m32-bridge.cmd"
+        if os.name == "nt"
+        else Path.home() / ".local" / "bin" / "m32-bridge"
+    )
+    launcher_path = Path(os.environ.get("M32_BRIDGE_LAUNCHER") or default_launcher)
+    runtime_environ = dict(os.environ)
+    installed_uv = runtime_environ.get("M32_BRIDGE_UV_BIN")
+    if installed_uv:
+        runtime_environ["PATH"] = str(Path(installed_uv).parent) + os.pathsep + runtime_environ.get("PATH", "")
+    runtime = local_runtime_diagnostics(
+        environ=runtime_environ,
+        app_path=str(app_path),
+        launcher_path=str(launcher_path),
+    )
+    runtime["import_provenance"] = provenance
+    result = {
+        "tty_mode": "runtime",
+        "ok": True,
+        "status": "ready",
+        "app_path": str(app_path),
+        "launcher_path": str(launcher_path),
+        "runtime_info": runtime,
+        "console_configured": precondition.configured,
+        "console_precondition_state": precondition.state,
+        "console_connection_status": "not_checked",
+        "osc_writes_sent": 0,
+        "hardware_verified": False,
+        "production_live_ready": False,
+        "dry_run": False,
+    }
+    surface = "windows" if os.name == "nt" else "posix"
+    final, _ = run_tty_app(surface, result, dry_run=False, color=True)
+    return int(final.get("runtime_exit_code", 0 if final.get("ok") else 1))
+
+
 def run_tty_app(
     surface: str,
     result: dict[str, Any],
@@ -1918,6 +2274,7 @@ def run_tty_app(
     panel_offset = 0
     view = "main"
     setup_state: SetupState | None = None
+    pending_setup_command: str | None = None
     key_reader = key_reader or read_single_keypress
     transcript: list[str] = []
 
@@ -1943,29 +2300,79 @@ def run_tty_app(
         stream.write(frame)
         stream.flush()
 
+    def gate_runtime_command(command: str) -> bool:
+        nonlocal pending_setup_command, panel_lines, panel_offset, input_buffer, view
+        if result.get("tty_mode") != "runtime" or not _requires_console_config(command):
+            return False
+        precondition = evaluate_console_precondition()
+        _store_console_precondition(result, precondition)
+        if precondition.state == "ready":
+            return False
+        pending_setup_command = None
+        if precondition.state == "setup_required":
+            eligible = _can_retry_after_setup(command)
+            if eligible:
+                pending_setup_command = command
+            panel_lines = render_setup_required_panel(
+                command,
+                allow_setup_chain=eligible,
+                color=color,
+            ).splitlines()
+        else:
+            panel_lines = render_runtime_command_failure("CONFIG_INVALID", log_path=None, color=color).splitlines()
+        panel_offset = 0
+        input_buffer = ""
+        view = "action"
+        return True
+
+    def start_setup_flow() -> None:
+        nonlocal setup_state, pending_setup_command, panel_lines, panel_offset, input_buffer, view
+        try:
+            setup_state = _setup_state_from_current_config()
+        except Exception:
+            setup_state = None
+            pending_setup_command = None
+            panel_lines = render_runtime_command_failure("CONFIG_INVALID", log_path=None, color=color).splitlines()
+            panel_offset = 0
+            input_buffer = ""
+            view = "action"
+            return
+        panel_lines = _setup_state_lines(setup_state, color=color)
+        panel_offset = 0
+        input_buffer = ""
+        view = "setup"
+
     with TTYSession(stream=stream, color=color, fullscreen=True):
         draw()
         while True:
             try:
                 key = key_reader()
             except (EOFError, OSError, RuntimeError):
-                output = "Input stream is unavailable. Press ESC to exit or reopen the installer in an interactive terminal."
-                stop = True
+                output = "Input stream is unavailable. Reopen the Runtime Console in an interactive terminal."
+                if result.get("tty_mode") == "runtime":
+                    result.update(
+                        ok=False,
+                        status="runtime_input_failed",
+                        runtime_exit_reason="input_failure",
+                        runtime_exit_code=1,
+                    )
                 panel_lines = output.splitlines()
                 panel_offset = 0
                 view = "panel"
                 draw()
-                if stop:
-                    break
-                continue
+                break
             except KeyboardInterrupt:
-                result["status"] = "cancelled"
-                result["ok"] = False
+                if result.get("tty_mode") == "runtime":
+                    result.update(ok=False, status="interrupted", runtime_exit_reason="interrupted", runtime_exit_code=130)
+                else:
+                    result["status"] = "cancelled"
+                    result["ok"] = False
                 break
 
             if key == "ESC":
                 if setup_state is not None:
                     setup_state = None
+                    pending_setup_command = None
                     panel_lines = None
                     panel_offset = 0
                     input_buffer = ""
@@ -1980,11 +2387,14 @@ def run_tty_app(
                     draw()
                     continue
                 if panel_lines is not None:
+                    pending_setup_command = None
                     panel_lines = None
                     panel_offset = 0
                     view = "main"
                     draw()
                     continue
+                if result.get("tty_mode") == "runtime":
+                    result.update(runtime_exit_reason="user_exit", runtime_exit_code=0, ok=True)
                 break
             if key == "BACKSPACE":
                 if setup_state is not None:
@@ -2027,7 +2437,20 @@ def run_tty_app(
                     output, done = _advance_setup_state(setup_state, result, color=color)
                     if done:
                         setup_state = None
-                        panel_lines = output.splitlines() if output else None
+                        post_setup_precondition = evaluate_console_precondition()
+                        _store_console_precondition(result, post_setup_precondition)
+                        if pending_setup_command and _retry_is_ready(pending_setup_command, post_setup_precondition):
+                            retry_command = pending_setup_command
+                            pending_setup_command = None
+                            width, _ = terminal_size(size_provider)
+                            retry_output, stop = execute_installer_command(retry_command, result, color=color, width=width)
+                            panel_lines = retry_output.splitlines() if retry_output else None
+                            if stop:
+                                draw()
+                                break
+                        else:
+                            pending_setup_command = None
+                            panel_lines = output.splitlines() if output else None
                         panel_offset = 0
                         view = "action"
                     elif output:
@@ -2040,14 +2463,17 @@ def run_tty_app(
                         view = "setup"
                     draw()
                     continue
+                if key == "ENTER" and pending_setup_command and setup_state is None:
+                    start_setup_flow()
+                    draw()
+                    continue
                 if input_buffer.startswith("/"):
                     selected = picker.select(input_buffer) or input_buffer
                     if selected == "/setup":
-                        setup_state = _setup_state_from_current_config()
-                        panel_lines = _setup_state_lines(setup_state, color=color)
-                        panel_offset = 0
-                        view = "setup"
-                        input_buffer = ""
+                        start_setup_flow()
+                        draw()
+                        continue
+                    if gate_runtime_command(selected):
                         draw()
                         continue
                     width, _ = terminal_size(size_provider)
@@ -2063,16 +2489,18 @@ def run_tty_app(
                     input_buffer = ""
                     draw()
                     if stop:
+                        if result.get("tty_mode") == "runtime":
+                            result.update(runtime_exit_reason="user_exit", runtime_exit_code=0, ok=True)
                         break
                     continue
                 if key == "ENTER":
                     command = input_buffer
                     if parse_installer_command(command) == "/setup":
-                        setup_state = _setup_state_from_current_config()
-                        panel_lines = _setup_state_lines(setup_state, color=color)
-                        panel_offset = 0
-                        view = "setup"
-                        input_buffer = ""
+                        start_setup_flow()
+                        draw()
+                        continue
+                    parsed_command = parse_installer_command(command)
+                    if parsed_command and gate_runtime_command(parsed_command):
                         draw()
                         continue
                     width, _ = terminal_size(size_provider)
@@ -2083,6 +2511,8 @@ def run_tty_app(
                     input_buffer = ""
                     draw()
                     if stop:
+                        if result.get("tty_mode") == "runtime":
+                            result.update(runtime_exit_reason="user_exit", runtime_exit_code=0, ok=True)
                         break
                     continue
             if len(str(key)) == 1 and ord(str(key)) >= 32:
@@ -2107,6 +2537,39 @@ def run_tty_app(
     return result, "".join(transcript)
 
 
+def _runtime_has_console_config() -> bool:
+    return evaluate_console_precondition().state == "ready"
+
+
+def _requires_console_config(command: str) -> bool:
+    metadata = COMMAND_REGISTRY.get(command)
+    return bool(metadata and metadata.get("requires_console_config"))
+
+
+def _can_retry_after_setup(command: str) -> bool:
+    metadata = COMMAND_REGISTRY.get(command)
+    return bool(
+        metadata
+        and metadata.get("requires_console_config")
+        and metadata.get("read_only")
+        and metadata.get("safe_to_retry_after_setup")
+    )
+
+
+def _retry_is_ready(command: str, precondition: Any | None = None) -> bool:
+    state = precondition.state if precondition is not None else evaluate_console_precondition().state
+    return _can_retry_after_setup(command) and state == "ready"
+
+
+def _requires_console_setup(command: str) -> bool:
+    return _requires_console_config(command) and evaluate_console_precondition().state == "setup_required"
+
+
+def _store_console_precondition(result: dict[str, Any], precondition: Any) -> None:
+    result["console_precondition_state"] = precondition.state
+    result["console_configured"] = precondition.state == "ready"
+
+
 def termios_error() -> tuple[type[BaseException], ...]:
     try:
         import termios
@@ -2129,13 +2592,15 @@ def terminal_reset_sequence(*, color: bool = True) -> str:
     return reset_terminal() if color else ""
 
 
-def _render_header(colors: Colors) -> str:
-    return "\n".join(_header_lines(colors, width=80))
+def _render_header(colors: Colors, *, tty_mode: str = "installer") -> str:
+    return "\n".join(_header_lines(colors, width=80, tty_mode=tty_mode))
 
 
-def _header_lines(colors: Colors, *, width: int) -> list[str]:
+def _header_lines(colors: Colors, *, width: int, tty_mode: str = "installer") -> list[str]:
     border = "=" * max(min(width - 2, 76), 8)
-    if width <= 100:
+    if tty_mode == "runtime":
+        logo_lines = [RUNTIME_BANNER, RUNTIME_SUBTITLE, POWERED_BY]
+    elif width <= 100:
         logo_lines = [BANNER, POWERED_BY]
     else:
         logo_lines = [BANNER, POWERED_BY, *DXBMARK_ASCII_LOGO.splitlines()]
@@ -2148,6 +2613,8 @@ def _header_lines(colors: Colors, *, width: int) -> list[str]:
 
 
 def _body_rows(surface: str, result: dict[str, Any], *, dry_run: bool) -> list[TTYRow]:
+    if result.get("tty_mode") == "runtime":
+        return _runtime_body_rows(result)
     from m32_bridge.installer.runtime_manager import inspect_runtime, platform_information
 
     platform_info = result.get("platform_info") or platform_information()
@@ -2190,6 +2657,52 @@ def _body_rows(surface: str, result: dict[str, Any], *, dry_run: bool) -> list[T
     return rows
 
 
+def _runtime_body_rows(result: dict[str, Any]) -> list[TTYRow]:
+    runtime = result.get("runtime_info") if isinstance(result.get("runtime_info"), dict) else {}
+    configured = bool(result.get("console_configured"))
+    precondition_state = str(result.get("console_precondition_state") or ("ready" if configured else "setup_required"))
+    connection = result.get("console_connection_status") or "not_checked"
+    rows = [
+        TTYRow("section", "RUNTIME"),
+        TTYRow("field", label="Application", value="ready", value_style="success"),
+        TTYRow("field", label="Managed Python", value="ready", value_style="success"),
+        TTYRow("field", label="Python version", value=runtime.get("managed_python_version") or runtime.get("python_version") or "3.13", value_style="success"),
+        TTYRow("field", label="Frozen launcher", value="enabled", value_style="success"),
+        TTYRow("section", "CONSOLE"),
+        TTYRow("field", label="Configured", value=_bool(configured), value_style="success" if configured else "warning"),
+        TTYRow(
+            "field",
+            label="Configuration state",
+            value=precondition_state,
+            value_style="error" if precondition_state == "config_invalid" else ("success" if precondition_state == "ready" else "warning"),
+        ),
+        TTYRow("field", label="Connection", value=connection, value_style="muted" if connection == "not_checked" else _semantic_style_for_value(connection)),
+    ]
+    if precondition_state == "config_invalid":
+        rows.extend(
+            [
+                TTYRow("section", "NEXT ACTION"),
+                TTYRow("warning", "Repair the saved configuration or run /setup"),
+            ]
+        )
+    elif not configured:
+        rows.extend(
+            [
+                TTYRow("section", "NEXT ACTION"),
+                TTYRow("warning", "Run /setup to configure a console endpoint"),
+            ]
+        )
+    rows.extend(
+        [
+            TTYRow("section", "SAFETY"),
+            TTYRow("field", label="OSC writes", value=0, value_style="success"),
+            TTYRow("field", label="Network scan", value="not_run", value_style="success"),
+            TTYRow("text", "Type / to open all commands."),
+        ]
+    )
+    return rows
+
+
 def _body_lines(surface: str, result: dict[str, Any], *, dry_run: bool) -> list[str]:
     colors = Colors(False)
     return [render_semantic_row(row, colors) for row in _body_rows(surface, result, dry_run=dry_run)]
@@ -2206,7 +2719,8 @@ def render_footer_status(
     colors = Colors(color)
     now = datetime.now().strftime("%H:%M:%S")
     state = result.get("status")
-    uv = "UV OK" if result.get("uv_detected") else "UV SETUP REQUIRED"
+    runtime_mode = result.get("tty_mode") == "runtime"
+    uv = "RUNTIME READY" if runtime_mode else ("UV OK" if result.get("uv_detected") else "UV SETUP REQUIRED")
     hints = {
         "picker": "[Up/Down] Navigate | [Tab/Enter] Select | [ESC] Dismiss",
         "help": "[ESC] Back | /status | /contact | /exit",
@@ -2341,20 +2855,24 @@ def _resolved_runtime_metadata() -> Any:
 
 
 def _setup_state_from_current_config() -> SetupState:
+    from m32_bridge.config.runtime import default_user_config_path
+
     resolution = _resolved_runtime_metadata()
+    configuration_unreadable = resolution.error_code == "CONFIG_INVALID"
     current_values: dict[str, str] = {}
-    if resolution.effective_host:
+    if not configuration_unreadable and resolution.effective_host:
         current_values["host"] = str(resolution.effective_host)
-    if resolution.effective_port:
+    if not configuration_unreadable and resolution.effective_port:
         current_values["port"] = str(resolution.effective_port)
-    if resolution.effective_label:
+    if not configuration_unreadable and resolution.effective_label:
         current_values["label"] = str(resolution.effective_label)
-    current_values["target_type"] = resolution.effective_intended_target_type or "unknown"
+    current_values["target_type"] = "unknown" if configuration_unreadable else (resolution.effective_intended_target_type or "unknown")
     return SetupState(
         current_values=current_values,
-        source_by_field=dict(resolution.source_by_field),
-        config_path=_config_path_text(resolution.config_path),
-        target_type_index=_target_type_index(resolution.effective_intended_target_type),
+        source_by_field={} if configuration_unreadable else dict(resolution.source_by_field),
+        config_path=_config_path_text(resolution.config_path or default_user_config_path()),
+        target_type_index=_target_type_index("unknown" if configuration_unreadable else resolution.effective_intended_target_type),
+        configuration_unreadable=configuration_unreadable,
     )
 
 

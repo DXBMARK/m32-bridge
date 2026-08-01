@@ -92,7 +92,25 @@ def main(argv: list[str] | None = None) -> int:
     if args.json_output:
         print(json.dumps(result, indent=2, sort_keys=True))
     elif tty_mode and result.get("runtime_info", {}).get("application_runtime_ready"):
-        _run_tty_app(args.surface, result, dry_run=args.dry_run, color=args.color)
+        try:
+            return handoff_to_installed_runtime(args.surface, result)
+        except (OSError, RuntimeError) as exc:
+            diagnostic_log = _write_install_diagnostic_log(
+                _diagnostic_log_dir(result),
+                stdout="",
+                stderr=f"{type(exc).__name__}: {exc}",
+            )
+            failure = _controlled_install_failure(
+                args.surface,
+                result,
+                error_code="INSTALLED_RUNTIME_HANDOFF_FAILED",
+                failed_step="runtime_tty_handoff",
+                message="The installed Runtime Console could not be started.",
+                recovery_action=f"Run the installed launcher directly: {result['launcher_path']} run",
+                diagnostic_log_path=str(diagnostic_log),
+            )
+            _print_plain(args.surface, failure, dry_run=False)
+            return 1
     else:
         _print_plain(args.surface, result, dry_run=args.dry_run)
     return 0 if result["ok"] else 1
@@ -186,6 +204,13 @@ def perform_apply_install(
             "classification": None,
             "osc_writes_sent": 0,
             "hardware_verified": False,
+        },
+        "runtime_handoff": {
+            "launcher_path": str(public_result["launcher_path"]),
+            "subcommand": "run",
+            "installed_runtime": True,
+            "bootstrap_runtime_tty": False,
+            "implicit_sync": False,
         },
         "verification_guidance": {
             "offered": True,
@@ -692,8 +717,11 @@ def _apply_user_local_install(surface: str, result: dict[str, Any], *, uv_bin: s
             "@echo off\r\n"
             f"set \"M32_BRIDGE_APP_DIR={app_value}\"\r\n"
             f"set \"UV_BIN={uv_value}\"\r\n"
+            f"set \"M32_BRIDGE_LAUNCHER={_cmd_assignment_value(str(launcher_path))}\"\r\n"
+            "set \"M32_BRIDGE_UV_BIN=%UV_BIN%\"\r\n"
             "set \"PYTHONPATH=%M32_BRIDGE_APP_DIR%\\src;%PYTHONPATH%\"\r\n"
             "set \"UV_MANAGED_PYTHON=1\"\r\n"
+            "set \"M32_BRIDGE_INSTALLED_RUNTIME=1\"\r\n"
             "cd /d \"%M32_BRIDGE_APP_DIR%\"\r\n"
             "\"%UV_BIN%\" run --frozen --managed-python --python 3.13 --no-build --no-sync --project \"%M32_BRIDGE_APP_DIR%\" python -m m32_bridge.__main__ %*\r\n",
             encoding="utf-8",
@@ -703,14 +731,52 @@ def _apply_user_local_install(surface: str, result: dict[str, Any], *, uv_bin: s
             "#!/bin/sh\n"
             f"APP_DIR={shlex.quote(str(app_path))}\n"
             f"UV_BIN={shlex.quote(resolved_uv_bin)}\n"
+            f"M32_BRIDGE_LAUNCHER={shlex.quote(str(launcher_path))}\n"
+            "M32_BRIDGE_UV_BIN=\"$UV_BIN\"\n"
             "cd \"$APP_DIR\"\n"
             "PYTHONPATH=\"$APP_DIR/src${PYTHONPATH:+:$PYTHONPATH}\"\n"
             "UV_MANAGED_PYTHON=1\n"
-            "export M32_BRIDGE_APP_DIR=\"$APP_DIR\" PYTHONPATH UV_MANAGED_PYTHON\n"
+            "M32_BRIDGE_INSTALLED_RUNTIME=1\n"
+            "export M32_BRIDGE_APP_DIR=\"$APP_DIR\" M32_BRIDGE_LAUNCHER M32_BRIDGE_UV_BIN PYTHONPATH UV_MANAGED_PYTHON M32_BRIDGE_INSTALLED_RUNTIME\n"
             "exec \"$UV_BIN\" run --frozen --managed-python --python 3.13 --no-build --no-sync --project \"$APP_DIR\" python -m m32_bridge.__main__ \"$@\"\n",
             encoding="utf-8",
         )
         launcher_path.chmod(0o755)
+
+
+def handoff_to_installed_runtime(
+    surface: str,
+    result: dict[str, Any],
+    *,
+    exec_replace: Any = os.execve,
+    runner: Any = subprocess.run,
+) -> int:
+    launcher = Path(str(result.get("launcher_path") or "")).expanduser()
+    app_path = Path(str(result.get("app_path") or "")).expanduser()
+    if not launcher.is_absolute() or not launcher.is_file():
+        raise RuntimeError("Installed runtime launcher is unavailable for TTY handoff.")
+    if not app_path.is_absolute() or not app_path.is_dir() or not (app_path / ".venv").is_dir():
+        raise RuntimeError("Installed application runtime is unavailable for TTY handoff.")
+    launcher = launcher.resolve()
+    app_path = app_path.resolve()
+    environment = dict(os.environ)
+    environment.pop("PYTHONPATH", None)
+    environment.update(
+        {
+            "M32_BRIDGE_INSTALLED_RUNTIME": "1",
+            "M32_BRIDGE_APP_DIR": str(app_path),
+            "UV_MANAGED_PYTHON": "1",
+        }
+    )
+    argv = [str(launcher), "run"]
+    if surface == "windows":
+        completed = runner(argv, check=False, env=environment)
+        return_code = int(completed.returncode)
+        if return_code != 0:
+            raise RuntimeError(f"Installed runtime TTY handoff failed with exit code {return_code}.")
+        return 0
+    result_code = exec_replace(str(launcher), argv, environment)
+    return int(result_code or 0)
 
 
 def _cmd_assignment_value(value: str) -> str:

@@ -88,8 +88,38 @@ def test_config_show_malformed_config_returns_structured_error(tmp_path: Path):
     assert completed.returncode != 0
     payload = _payload(completed)
     assert payload["ok"] is False
-    assert payload["status"] == "INVALID_CONFIG"
-    assert payload["error_code"] == "INVALID_CONFIG"
+    assert payload["status"] == "CONFIG_INVALID"
+    assert payload["error_code"] == "CONFIG_INVALID"
     assert payload["config_path"] == str(config_path)
     assert payload["exception_type"] is not None
     assert payload["osc_writes_sent"] == 0
+
+
+def test_config_show_invalid_port_is_not_configured(tmp_path: Path):
+    config_path = tmp_path / "runtime.yaml"
+    config_path.write_text("host: console.example\nport: 0\n", encoding="utf-8")
+
+    completed = _run_config_show(config_path)
+
+    assert completed.returncode != 0
+    payload = _payload(completed)
+    assert payload["ok"] is False
+    assert payload["status"] == "INVALID_PORT"
+    assert payload["error_code"] == "INVALID_PORT"
+    assert payload["configured_host"] is None
+    assert payload["configured_port"] is None
+
+
+def test_config_show_invalid_host_is_not_configured(tmp_path: Path):
+    config_path = tmp_path / "runtime.yaml"
+    config_path.write_text("host:\n  - console.example\nport: 10023\n", encoding="utf-8")
+
+    completed = _run_config_show(config_path)
+
+    assert completed.returncode != 0
+    payload = _payload(completed)
+    assert payload["ok"] is False
+    assert payload["status"] == "INVALID_HOST"
+    assert payload["error_code"] == "INVALID_HOST"
+    assert payload["configured_host"] is None
+    assert payload["configured_port"] is None

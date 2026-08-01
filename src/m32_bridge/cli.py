@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any, Sequence
 from uuid import uuid4
 
-import yaml
 from jsonschema import ValidationError
 
 from m32_bridge.config.runtime import (
@@ -23,32 +22,46 @@ from m32_bridge.config.runtime import (
     validate_runtime_config,
 )
 from m32_bridge.config.schemas import validate_with_schema
-from m32_bridge.core.connection import ConnectionController
-from m32_bridge.diagnostics.device_identity import classify_device
 from m32_bridge.diagnostics.os_recommendations import build_os_recommendations
-from m32_bridge.diagnostics.runtime import setup_info_probe
 from m32_bridge.diagnostics.runtime_output import runtime_output
-from m32_bridge.osc.client import OscClient
-from m32_bridge.osc.discovery import discover_identity, read_state_value
-from m32_bridge.osc.transport import OscTransport
-from m32_bridge.state.snapshot import build_snapshot
+from m32_bridge.runtime_preconditions import evaluate_console_precondition
 
 DEFAULT_REQUIRED_PATHS = ("/ch/01/headamp/gain", "/rta/source")
+
+
+def setup_info_probe(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    from m32_bridge.diagnostics.runtime import setup_info_probe as probe
+
+    return probe(*args, **kwargs)
 
 
 def health() -> dict[str, Any]:
     from m32_bridge.installer.runtime_manager import local_runtime_diagnostics
 
-    runtime = local_runtime_diagnostics()
-    result = _base_result("health", "ok")
+    runtime_environ = dict(os.environ)
+    installed_uv = runtime_environ.get("M32_BRIDGE_UV_BIN")
+    if installed_uv:
+        runtime_environ["PATH"] = str(Path(installed_uv).parent) + os.pathsep + runtime_environ.get("PATH", "")
+    runtime = local_runtime_diagnostics(
+        environ=runtime_environ,
+        app_path=runtime_environ.get("M32_BRIDGE_APP_DIR"),
+        launcher_path=runtime_environ.get("M32_BRIDGE_LAUNCHER"),
+    )
+    precondition = evaluate_console_precondition(environ=dict(os.environ))
+    invalid = precondition.state == "config_invalid"
+    configured = precondition.configured
+    result = _base_result("health", "CONFIG_INVALID" if invalid else "ok")
+    result["ok"] = not invalid
+    if invalid:
+        result["error_code"] = "CONFIG_INVALID"
     result["checks"] = {
         "cli": "ok",
         "runtime": runtime,
-        "config": "present" if default_user_config_path().exists() else "not_configured",
+        "config": "invalid" if invalid else ("present" if configured else "not_configured"),
         "launcher": runtime.get("launcher_file"),
         "source": "local_checkout" if Path("pyproject.toml").is_file() else "installed_user_local",
         "console_probe": "not_run",
-        "network_scan": False,
+        "network_scan": "not_run",
         "osc_writes_sent": 0,
         "mcp_primary_transport": "stdio",
         "webui": "absent",
@@ -57,10 +70,33 @@ def health() -> dict[str, Any]:
     result["osc_writes_sent"] = 0
     result["hardware_verified"] = False
     result["production_live_ready"] = False
+    result.update(
+        {
+            "application_runtime": "healthy",
+            "managed_python": "ready" if runtime.get("managed_python_detected") else "not_checked",
+            "frozen_launcher": "enabled",
+            "console_configured": configured,
+            "console_connection": "not_checked",
+            "operational_readiness": "config_invalid" if invalid else ("ready" if configured else "setup_required"),
+            "next_action": (
+                None
+                if configured
+                else (
+                    "Repair the saved configuration or run m32-bridge setup"
+                    if invalid
+                    else "Run m32-bridge setup"
+                )
+            ),
+        }
+    )
+    result.update(precondition.as_dict(include_error_code=invalid))
+    result["console_connection"] = "not_checked"
     return result
 
 
 def doctor(*, config_path: Path = Path("config.example.yaml")) -> dict[str, Any]:
+    import yaml
+
     result = _base_result("doctor", "ok")
     checks: dict[str, Any] = {
         "config_schema": {"status": "not_checked", "path": str(config_path)},
@@ -88,6 +124,9 @@ def doctor(*, config_path: Path = Path("config.example.yaml")) -> dict[str, Any]
 
 
 def operator_snapshot(client: OscClient, *, snapshot_id: str | None = None) -> dict[str, Any]:
+    from m32_bridge.osc.discovery import discover_identity
+    from m32_bridge.state.snapshot import build_snapshot
+
     discovery = discover_identity(client.transport)
     state_values = [_state_value_dict(client, path) for path in DEFAULT_REQUIRED_PATHS]
     identity = discovery.identity.__dict__.copy()
@@ -109,6 +148,8 @@ def operator_snapshot(client: OscClient, *, snapshot_id: str | None = None) -> d
 
 
 def verify_connection(client: OscClient) -> dict[str, Any]:
+    from m32_bridge.core.connection import ConnectionController
+
     controller = ConnectionController(client, required_paths=DEFAULT_REQUIRED_PATHS)
     reconciliation = controller.reconcile_after_reconnect()
     result = _base_result("verify-connection", "ok" if reconciliation.reconciled else "error")
@@ -365,6 +406,8 @@ def detect_device_runtime(
     timeout: float = 0.5,
     probe_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    from m32_bridge.diagnostics.device_identity import classify_device
+
     if host is None:
         resolution = resolve_runtime_config(cli_args={}, environ={}, allow_project_local=False)
         return classify_device(
@@ -471,36 +514,40 @@ def doctor_runtime_command(
 
 
 def config_show_runtime(*, config_path: Path) -> dict[str, Any]:
-    try:
-        raw_config = _load_runtime_config_strict(config_path)
-    except yaml.YAMLError as exc:
-        payload = runtime_output(
-            ok=False,
-            status="INVALID_CONFIG",
-            error_code="INVALID_CONFIG",
-            message="Runtime config file is malformed.",
-            configured_host=None,
-            configured_port=None,
-            attempted_path=None,
-            latency_ms=None,
-            exception_type=type(exc).__name__,
-            osc_writes_sent=0,
-            hardware_verified=False,
-            production_live_ready=False,
-        )
-        payload["config_path"] = str(config_path)
-        return payload
-
     resolution = resolve_runtime_config(
         cli_args={},
         environ={},
         user_config_path=config_path,
         allow_project_local=False,
     )
+    if resolution.error_code and resolution.error_code != "NO_CONSOLE_HOST":
+        error_code = "CONFIG_INVALID" if resolution.error_code in {"CONFIG_INVALID", "INVALID_CONFIG"} else resolution.error_code
+        payload = runtime_output(
+            ok=False,
+            status=error_code,
+            error_code=error_code,
+            message=resolution.message or "Runtime config is invalid.",
+            configured_host=None,
+            configured_port=None,
+            attempted_path="not_attempted",
+            latency_ms=None,
+            exception_type="ConfigurationError",
+            osc_writes_sent=0,
+            hardware_verified=False,
+            production_live_ready=False,
+        )
+        payload.update(
+            config_path=str(resolution.config_path or config_path),
+            console_probe="not_run",
+            network_scan="not_run",
+        )
+        return payload
     if resolution.error_code == "NO_CONSOLE_HOST":
         payload = no_console_host_output(resolution)
         payload["config_path"] = str(config_path)
         return payload
+
+    raw_config = _load_runtime_config_strict(config_path)
 
     payload = runtime_output(
         ok=True,
@@ -570,6 +617,21 @@ def config_validate_runtime(
         project_config_path=project_config_path,
         allow_project_local=allow_project_local,
     )
+    if resolution.error_code and resolution.error_code != "NO_CONSOLE_HOST":
+        return runtime_output(
+            ok=False,
+            status=resolution.error_code,
+            error_code=resolution.error_code,
+            message=resolution.message or "Runtime config is invalid.",
+            configured_host=resolution.effective_host,
+            configured_port=None if resolution.error_code == "INVALID_PORT" else resolution.effective_port,
+            attempted_path=None,
+            latency_ms=None,
+            exception_type=None,
+            osc_writes_sent=0,
+            hardware_verified=False,
+            production_live_ready=False,
+        )
     if resolution.error_code == "NO_CONSOLE_HOST":
         payload = no_console_host_output(resolution)
         payload["config_path"] = str(config_path)
@@ -689,13 +751,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.command is None:
-        from m32_bridge.interactive_shell import interactive_shell_loop, non_interactive_shell_required
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            from m32_bridge.installer.tty_app import run_runtime_tty
 
-        if sys.stdin.isatty():
-            return interactive_shell_loop()
-        result = non_interactive_shell_required(stdin_is_tty=False)
+            return run_runtime_tty()
+        result = _non_interactive_runtime_tty_output()
         print(json.dumps(result, sort_keys=True), file=sys.stdout)
         return 1
+    if args.command == "run":
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            result = _non_interactive_runtime_tty_output()
+            print(json.dumps(result, sort_keys=True), file=sys.stdout)
+            return 1
+        from m32_bridge.installer.tty_app import run_runtime_tty
+
+        return run_runtime_tty()
     if args.command == "mcp-server":
         from m32_bridge.mcp.server import run_mcp_stdio_server
 
@@ -809,8 +879,16 @@ def _run_command(args: argparse.Namespace) -> dict[str, Any]:
             version=application_version(),
         )
     if args.command == "get-info":
+        if args.host is None:
+            required = _console_setup_precondition()
+            if required is not None:
+                return required
         return get_info_runtime(host=args.host, port=args.port, timeout=args.timeout)
     if args.command == "detect-device":
+        if args.host is None:
+            required = _console_setup_precondition()
+            if required is not None:
+                return required
         return detect_device_runtime(
             host=args.host,
             port=args.port,
@@ -840,8 +918,9 @@ def _run_command(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="m32_bridge", description="Local M32 bridge operator controls")
+    parser = argparse.ArgumentParser(prog="m32-bridge", description="Local M32 bridge operator controls")
     subparsers = parser.add_subparsers(dest="command", required=False)
+    subparsers.add_parser("run", help="Open the branded Runtime Console")
     subparsers.add_parser("health")
 
     doctor_parser = subparsers.add_parser("doctor")
@@ -927,6 +1006,55 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _non_interactive_runtime_tty_output() -> dict[str, Any]:
+    return runtime_output(
+        ok=False,
+        status="NON_INTERACTIVE_SHELL_REQUIRED",
+        error_code="NON_INTERACTIVE_SHELL_REQUIRED",
+        message="Runtime Console requires an interactive terminal. Use a one-shot command instead.",
+        attempted_path="not_attempted",
+        latency_ms=None,
+        exception_type=None,
+        osc_writes_sent=0,
+        hardware_verified=False,
+        production_live_ready=False,
+        recommendations=["m32-bridge --help", "m32-bridge health", "m32-bridge setup", "m32-bridge mcp-server"],
+    ) | {"started": False, "network_scan": "not_run"}
+
+
+def _console_setup_precondition() -> dict[str, Any] | None:
+    precondition = evaluate_console_precondition(environ=dict(os.environ))
+    if precondition.state == "ready":
+        return None
+    if precondition.state == "config_invalid":
+        return runtime_output(
+            ok=False,
+            status="CONFIG_INVALID",
+            error_code="CONFIG_INVALID",
+            message="The saved console configuration is invalid.",
+            attempted_path="not_attempted",
+            latency_ms=None,
+            exception_type=None,
+            osc_writes_sent=0,
+            hardware_verified=False,
+            production_live_ready=False,
+            recommendations=["m32-bridge setup"],
+        ) | precondition.as_dict()
+    return runtime_output(
+        ok=False,
+        status="SETUP_REQUIRED",
+        error_code="SETUP_REQUIRED",
+        message="A console endpoint has not been configured.",
+        attempted_path="not_attempted",
+        latency_ms=None,
+        exception_type=None,
+        osc_writes_sent=0,
+        hardware_verified=False,
+        production_live_ready=False,
+        recommendations=["m32-bridge setup"],
+    ) | precondition.as_dict()
+
+
 def _add_client_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=10023)
@@ -934,6 +1062,9 @@ def _add_client_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _client_from_args(args: argparse.Namespace) -> OscClient:
+    from m32_bridge.osc.client import OscClient
+    from m32_bridge.osc.transport import OscTransport
+
     return OscClient(OscTransport(args.host, args.port, timeout=args.timeout))
 
 
@@ -949,6 +1080,8 @@ def _response_address_mismatch(response_address: object, host: str, port: int) -
 
 
 def _load_runtime_config_strict(path: Path) -> dict[str, Any]:
+    import yaml
+
     try:
         loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
     except OSError:
@@ -1018,6 +1151,8 @@ def _current_os_recommendations() -> dict[str, Any]:
 
 
 def _state_value_dict(client: OscClient, path: str) -> dict[str, Any]:
+    from m32_bridge.osc.discovery import read_state_value
+
     value = read_state_value(client.transport, path)
     return {
         "path": value.path,
