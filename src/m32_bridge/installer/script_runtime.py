@@ -11,6 +11,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .dependency_failures import (
+    classify_install_failure,
+    locked_wheel_message as _locked_wheel_message,
+    write_install_diagnostic_log as _write_install_diagnostic_log,
+)
 from .planner import plan_dry_run_install
 from .runtime_manager import (
     APPROVED_PYTHON_MINOR,
@@ -21,6 +26,8 @@ from .runtime_manager import (
     managed_python_policy,
     platform_information,
 )
+from .support_matrix import InstallerTarget, target_for_installer_platform
+
 VERSION = "0.1.0"
 IDEMPOTENCY_STATES = (
     "fresh_install",
@@ -147,6 +154,10 @@ def perform_apply_install(
             message=exc.message,
             recovery_action=exc.recovery_action,
             partial=True,
+            dependency_package=exc.dependency_package,
+            target_platform=exc.target_platform,
+            python_version=exc.python_version,
+            diagnostic_log_path=exc.diagnostic_log_path,
         )
 
     status = "already_current" if result["status"] in {"fresh_install", "repair", "update"} else result["status"]
@@ -199,12 +210,27 @@ def perform_apply_install(
 
 
 class InstallStepError(RuntimeError):
-    def __init__(self, *, error_code: str, failed_step: str, message: str, recovery_action: str) -> None:
+    def __init__(
+        self,
+        *,
+        error_code: str,
+        failed_step: str,
+        message: str,
+        recovery_action: str,
+        dependency_package: str | None = None,
+        target_platform: str | None = None,
+        python_version: str | None = None,
+        diagnostic_log_path: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.error_code = error_code
         self.failed_step = failed_step
         self.message = message
         self.recovery_action = recovery_action
+        self.dependency_package = dependency_package
+        self.target_platform = target_platform
+        self.python_version = python_version
+        self.diagnostic_log_path = diagnostic_log_path
 
 
 def _resolve_uv_executable(surface: str, uv_bin: str | None) -> str:
@@ -242,6 +268,10 @@ def _controlled_install_failure(
     message: str,
     recovery_action: str,
     partial: bool = False,
+    dependency_package: str | None = None,
+    target_platform: str | None = None,
+    python_version: str | None = None,
+    diagnostic_log_path: str | None = None,
 ) -> dict[str, Any]:
     from .lifecycle import render_lifecycle_guidance
 
@@ -256,21 +286,35 @@ def _controlled_install_failure(
         "admin_used": False,
         "network_scan": "not_run",
         "console_probe": "not_run",
+        "dependency_package": dependency_package,
+        "target_platform": target_platform,
+        "python_version": python_version,
+        "diagnostic_log_path": diagnostic_log_path,
     }
-    return {
+    payload = {
         **public_result,
         "ok": False,
         "status": status,
         "error_code": error_code,
+        "failed_step": failed_step,
         "message": message,
         "installer_can_continue": False,
         "runtime_info": runtime_info,
         "system_python_modified": False,
+        "recovery_action": recovery_action,
         "lifecycle_guidance": render_lifecycle_guidance(surface=surface, install_status=status),
         "hardware_verified": False,
         "production_live_ready": False,
         "osc_writes_sent": 0,
     }
+    optional = {
+        "dependency_package": dependency_package,
+        "target_platform": target_platform,
+        "python_version": python_version,
+        "diagnostic_log_path": diagnostic_log_path,
+    }
+    payload.update({key: value for key, value in optional.items() if value is not None})
+    return payload
 
 
 def _synchronize_application_runtime(surface: str, result: dict[str, Any], *, uv_bin: str | None = None) -> dict[str, Any]:
@@ -283,31 +327,95 @@ def _synchronize_application_runtime(surface: str, result: dict[str, Any], *, uv
             recovery_action="Rerun the installer; no shell restart or PATH export should be required.",
         )
     app_path = Path(result["app_path"])
+    target = _target_for_result(result)
+    diagnostic_log_dir = _diagnostic_log_dir(result)
+    if target is not None and not target.release_supported:
+        diagnostic_log = _write_install_diagnostic_log(
+            diagnostic_log_dir,
+            stdout="",
+            stderr=target.support_blocker,
+        )
+        raise InstallStepError(
+            error_code="LOCKED_WHEEL_UNAVAILABLE",
+            failed_step="application_sync",
+            message=_locked_wheel_message(),
+            recovery_action="Install a corrected M32 Bridge release or provide the diagnostic log to support.",
+            dependency_package=target.blocked_dependency,
+            target_platform=target.target_id,
+            python_version=target.python_version,
+            diagnostic_log_path=str(diagnostic_log),
+        )
     base = [str(uv_bin), "--directory", str(app_path)]
     env = dict(os.environ)
     env["UV_MANAGED_PYTHON"] = "1"
+    env["UV_NO_BUILD"] = "1"
+    source_path = str(app_path / "src")
+    env["PYTHONPATH"] = source_path + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    target_id = target.target_id if target is not None else str(result.get("platform") or "unknown")
     sync = _run_install_command(
-        [*base, "sync", "--frozen", "--managed-python", "--python", APPROVED_PYTHON_MINOR],
+        [
+            *base,
+            "sync",
+            "--frozen",
+            "--managed-python",
+            "--python",
+            APPROVED_PYTHON_MINOR,
+            "--no-build",
+            "--no-install-project",
+        ],
         env=env,
-        error_code="APP_SYNC_FAILED",
+        error_code="APPLICATION_SYNC_FAILED",
         failed_step="application_sync",
         recovery_action="Rerun the installer to repair the frozen application environment.",
+        diagnostic_log_dir=diagnostic_log_dir,
+        target_platform=target_id,
+        python_version=APPROVED_PYTHON_MINOR,
     )
     del sync
     smoke_code = "import yaml, mcp, pydantic, m32_bridge; print('READY')"
     smoke = _run_install_command(
-        [*base, "run", "--frozen", "--managed-python", "--python", APPROVED_PYTHON_MINOR, "python", "-c", smoke_code],
+        [
+            *base,
+            "run",
+            "--frozen",
+            "--managed-python",
+            "--python",
+            APPROVED_PYTHON_MINOR,
+            "--no-build",
+            "--no-sync",
+            "python",
+            "-c",
+            smoke_code,
+        ],
         env=env,
         error_code="REQUIRED_IMPORT_SMOKE_FAILED",
         failed_step="required_import_smoke",
         recovery_action="Rerun the installer to restore application dependencies.",
+        diagnostic_log_dir=diagnostic_log_dir,
+        target_platform=target_id,
+        python_version=APPROVED_PYTHON_MINOR,
     )
     version = _run_install_command(
-        [*base, "run", "--frozen", "--managed-python", "--python", APPROVED_PYTHON_MINOR, "python", "-c", "import platform; print(platform.python_version())"],
+        [
+            *base,
+            "run",
+            "--frozen",
+            "--managed-python",
+            "--python",
+            APPROVED_PYTHON_MINOR,
+            "--no-build",
+            "--no-sync",
+            "python",
+            "-c",
+            "import platform; print(platform.python_version())",
+        ],
         env=env,
         error_code="MANAGED_PYTHON_CHECK_FAILED",
         failed_step="managed_python_check",
         recovery_action="Rerun the installer to repair managed CPython 3.13.",
+        diagnostic_log_dir=diagnostic_log_dir,
+        target_platform=target_id,
+        python_version=APPROVED_PYTHON_MINOR,
     )
     launcher = Path(result["launcher_path"])
     ready = app_path.is_dir() and (app_path / ".venv").is_dir() and launcher.is_file() and smoke.stdout.strip() == "READY"
@@ -329,25 +437,57 @@ def _run_install_command(
     error_code: str,
     failed_step: str,
     recovery_action: str,
+    diagnostic_log_dir: Path,
+    target_platform: str,
+    python_version: str,
 ) -> subprocess.CompletedProcess[str]:
     try:
         completed = subprocess.run(argv, check=False, capture_output=True, text=True, env=env)
     except OSError as exc:
+        diagnostic_log = _write_install_diagnostic_log(diagnostic_log_dir, stdout="", stderr=str(exc))
         raise InstallStepError(
             error_code=error_code,
             failed_step=failed_step,
             message=f"{failed_step} could not start: {exc}",
             recovery_action=recovery_action,
+            target_platform=target_platform,
+            python_version=python_version,
+            diagnostic_log_path=str(diagnostic_log),
         ) from None
     if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "command failed").strip().splitlines()[-1]
+        output = "\n".join(part for part in (completed.stdout, completed.stderr) if part).strip()
+        classification = classify_install_failure(output, default_error_code=error_code)
+        diagnostic_log = _write_install_diagnostic_log(
+            diagnostic_log_dir,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+        )
+        is_missing_wheel = classification.error_code == "LOCKED_WHEEL_UNAVAILABLE"
         raise InstallStepError(
-            error_code=error_code,
+            error_code=classification.error_code,
             failed_step=failed_step,
-            message=f"{failed_step} failed: {detail}",
-            recovery_action=recovery_action,
+            message=_locked_wheel_message() if is_missing_wheel else f"{failed_step} failed. See the diagnostic log for complete command output.",
+            recovery_action=(
+                "Install a corrected M32 Bridge release or provide the diagnostic log to support."
+                if is_missing_wheel
+                else recovery_action
+            ),
+            dependency_package=classification.dependency_package,
+            target_platform=target_platform,
+            python_version=python_version,
+            diagnostic_log_path=str(diagnostic_log),
         )
     return completed
+
+
+def _target_for_result(result: dict[str, Any]) -> InstallerTarget | None:
+    platform = str(result.get("platform") or "")
+    architecture = result.get("architecture") or (result.get("platform_info") or {}).get("architecture")
+    return target_for_installer_platform(platform, str(architecture) if architecture else None)
+
+
+def _diagnostic_log_dir(result: dict[str, Any]) -> Path:
+    return Path(result["app_path"]).parent / "logs"
 
 
 def _post_install_guidance(surface: str, result: dict[str, Any], *, status: str) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -430,6 +570,7 @@ def build_install_result(
     if result.get("status") == "partial_failure":
         result["ok"] = False
         result["error_code"] = result.get("error_code") or "PARTIAL_FAILURE_RECOVERY_REQUIRED"
+    platform_info = platform_information()
     result.update(
         {
             "dry_run": dry_run,
@@ -446,7 +587,8 @@ def build_install_result(
             "approved_python_minor": APPROVED_PYTHON_MINOR,
             "project_python_range": PROJECT_PYTHON_RANGE,
             "runtime_info": inspect_runtime(),
-            "platform_info": platform_information(),
+            "platform_info": platform_info,
+            "architecture": result.get("architecture") or platform_info.get("architecture"),
             "system_python_modified": False,
             "global_python_installed": False,
             "default_python_aliases_installed": False,
@@ -553,7 +695,7 @@ def _apply_user_local_install(surface: str, result: dict[str, Any], *, uv_bin: s
             "set \"PYTHONPATH=%M32_BRIDGE_APP_DIR%\\src;%PYTHONPATH%\"\r\n"
             "set \"UV_MANAGED_PYTHON=1\"\r\n"
             "cd /d \"%M32_BRIDGE_APP_DIR%\"\r\n"
-            "\"%UV_BIN%\" run --frozen --managed-python --python 3.13 --project \"%M32_BRIDGE_APP_DIR%\" python -m m32_bridge.__main__ %*\r\n",
+            "\"%UV_BIN%\" run --frozen --managed-python --python 3.13 --no-build --no-sync --project \"%M32_BRIDGE_APP_DIR%\" python -m m32_bridge.__main__ %*\r\n",
             encoding="utf-8",
         )
     else:
@@ -565,7 +707,7 @@ def _apply_user_local_install(surface: str, result: dict[str, Any], *, uv_bin: s
             "PYTHONPATH=\"$APP_DIR/src${PYTHONPATH:+:$PYTHONPATH}\"\n"
             "UV_MANAGED_PYTHON=1\n"
             "export M32_BRIDGE_APP_DIR=\"$APP_DIR\" PYTHONPATH UV_MANAGED_PYTHON\n"
-            "exec \"$UV_BIN\" run --frozen --managed-python --python 3.13 --project \"$APP_DIR\" python -m m32_bridge.__main__ \"$@\"\n",
+            "exec \"$UV_BIN\" run --frozen --managed-python --python 3.13 --no-build --no-sync --project \"$APP_DIR\" python -m m32_bridge.__main__ \"$@\"\n",
             encoding="utf-8",
         )
         launcher_path.chmod(0o755)
@@ -749,6 +891,14 @@ def _print_plain(surface: str, result: dict[str, Any], *, dry_run: bool, tty: bo
     print("hardware_verified=false")
     print("production_live_ready=false")
     print("osc_writes_sent=0")
+    if not result.get("ok") and result.get("error_code"):
+        print(f"error_code: {result['error_code']}")
+        print(f"failed_step: {result.get('failed_step') or (result.get('runtime_info') or {}).get('failed_step')}")
+        print(f"dependency_package: {result.get('dependency_package') or 'unknown'}")
+        print(f"target_platform: {result.get('target_platform') or result.get('platform')}")
+        print(f"python_version: {result.get('python_version') or APPROVED_PYTHON_MINOR}")
+        print(f"recovery_action: {result.get('recovery_action') or (result.get('runtime_info') or {}).get('recovery_action')}")
+        print(f"diagnostic_log_path: {result.get('diagnostic_log_path') or 'not_available'}")
     lifecycle = result.get("lifecycle_guidance") or {}
     if lifecycle:
         print("lifecycle_guidance: update repair uninstall")

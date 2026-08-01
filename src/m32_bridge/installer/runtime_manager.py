@@ -154,7 +154,7 @@ def inspect_runtime(
         "system_python_used": False,
         "approved_minor": APPROVED_PYTHON_MINOR,
         "project_required_range": PROJECT_PYTHON_RANGE,
-        "launcher": "uv run --frozen --managed-python --python 3.13",
+        "launcher": "uv run --frozen --managed-python --python 3.13 --no-build --no-sync",
         "system_python_modified": False,
         "global_python_installed": False,
         "default_python_aliases_installed": False,

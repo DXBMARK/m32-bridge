@@ -388,6 +388,42 @@
         "null"
       ]
     },
+    "failed_step": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "dependency_package": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "target_platform": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "python_version": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "diagnostic_log_path": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "recovery_action": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "lifecycle_guidance": {
       "type": [
         "object",

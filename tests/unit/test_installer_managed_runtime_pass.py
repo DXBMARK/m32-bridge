@@ -69,6 +69,7 @@ def test_runtime_inspection_does_not_promote_compatible_system_python(monkeypatc
     assert runtime["python_source"] == "uv_managed"
     assert runtime["managed_python_detected"] is True
     assert runtime["system_python_modified"] is False
+    assert runtime["launcher"] == "uv run --frozen --managed-python --python 3.13 --no-build --no-sync"
 
 
 def test_runtime_inspection_and_diagnostics_respect_passed_environment(monkeypatch, tmp_path):
@@ -127,8 +128,11 @@ def test_script_runtime_policy_parity_and_no_dependency_drift_commands():
     assert "process-scoped" in windows
     for text in (posix, windows, script_runtime):
         assert "--frozen" in text
+        assert "--no-build" in text
         assert not re.search(r"uv(?:Path)?\s+run(?![^\n\r]*--frozen)", text)
         assert not re.search(r"uv run(?![^\n\r]*--frozen)", text)
+    assert "--no-project" in posix
+    assert "--no-project" in windows
     assert "uv.lock is required for reproducible frozen runtime execution" in posix
     assert "uv.lock is required for reproducible frozen runtime execution" in windows
     assert "uv.lock" in script_runtime

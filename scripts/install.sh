@@ -630,7 +630,7 @@ if [ -n "${UV_BIN}" ]; then
       export UV_CACHE_DIR
     fi
     PYTHONPATH="${PYTHONPATH_VALUE}" UV_MANAGED_PYTHON=1 M32_INSTALL_UV_BIN="${UV_BIN}" \
-      "${UV_BIN}" run --frozen --managed-python --python "${APPROVED_PYTHON_MINOR}" "$@"
+      "${UV_BIN}" run --frozen --managed-python --python "${APPROVED_PYTHON_MINOR}" --no-build --no-project "$@"
   fi
 else
   if [ "${JSON_OUTPUT}" = "1" ]; then
