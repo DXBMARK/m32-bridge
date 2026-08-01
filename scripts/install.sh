@@ -250,7 +250,8 @@ print_missing_uv_tty() {
   fi
   {
   cat <<TEXT
-DXBMARK M32 BRIDGE INSTALLER
+X32-BRIDGE MCP INSTALLER
+Powered by DXBMARK LLC
 #  ______  ______  __  __    _    ____  _  __
 # |  _ \\ \\/ / __ )|  \\/  |  / \\  |  _ \\| |/ / LLC
 # | | | \\  /|  _ \\| |\\/| | / _ \\ | |_) | ' /

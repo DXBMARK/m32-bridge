@@ -122,7 +122,13 @@ def perform_apply_install(surface: str, result: dict[str, Any]) -> dict[str, Any
         }
 
     status = "already_current" if result["status"] in {"fresh_install", "repair", "update"} else result["status"]
-    mcp_guidance = render_mcp_guidance(os_family="windows" if surface == "windows" else None)
+    launcher_path = Path(str(result.get("launcher_path", "")))
+    launcher_root = launcher_path.parents[2] if len(launcher_path.parents) >= 3 else None
+    mcp_guidance = render_mcp_guidance(
+        os_family="windows" if surface == "windows" else None,
+        home=None if surface == "windows" else launcher_root,
+        local_app_data=launcher_root if surface == "windows" else None,
+    )
     lifecycle_guidance = render_lifecycle_guidance(
         surface=surface,
         install_status=status,

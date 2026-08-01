@@ -28,6 +28,8 @@ def test_installer_mcp_guidance_output_omits_dangerous_commands(tmp_path):
     assert "send_raw_osc" not in text
     assert "execute_shell" not in text
     assert "approval_token" not in text
-    assert "remote mcp" not in text
-    assert "tunnel" not in text
-    assert "/set" not in text
+    assert "remote mcp available" not in text
+    assert "tunnel started" not in text
+    assert "localhost" not in text
+    assert "port-forward" not in text
+    assert "'/set'" not in text

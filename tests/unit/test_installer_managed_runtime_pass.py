@@ -264,14 +264,15 @@ def test_help_layouts_commands_colours_and_contact():
     medium = installer_help_text(width=80)
     compact = installer_help_text(width=50)
 
-    assert "TWO-COLUMN HELP" in wide
-    assert "ONE-COLUMN HELP" in medium
-    assert "COMPACT HELP" in compact
     for text in (wide, medium, compact):
+        assert "TWO-COLUMN HELP" not in text
+        assert "ONE-COLUMN HELP" not in text
+        assert "COMPACT HELP" not in text
         assert "STATUS COLOURS" in text
         assert "Green" in text and "Yellow" in text and "Red" in text and "Slate" in text
         assert "/verify-device" in text
-        assert "Shell: m32-bridge detect-device" in text
+        assert "m32-bridge detect-device" in text
+        assert "FIELD GUIDE" in text
         assert "/legend" not in text
         assert CONTACT_PHONE in text
 
@@ -283,6 +284,7 @@ def test_command_registry_is_exact_and_rejects_shell_syntax():
         "/get-info",
         "/verify-device",
         "/doctor-runtime",
+        "/mcp-config",
         "/status",
         "/contact",
         "/help",
@@ -313,15 +315,15 @@ def test_setup_empty_or_wrong_confirmation_does_not_probe_or_write(monkeypatch, 
             result,
             input_func=lambda prompt, answers=answers: next(answers),
         )
-        payload = json.loads(output.split("\n", 1)[1])
 
         assert stop is False
-        assert payload["probe_not_run"] is True
-        assert payload["config_not_written"] is True
-        assert payload["attempted_path"] is None
-        assert payload["intended_path"] == "/info"
-        assert payload["osc_writes_sent"] == 0
-        assert payload["scan_attempted"] is False
+        assert "SETUP RESULT" in output
+        assert "Probe not run" in output and "true" in output
+        assert "Config not written" in output and "true" in output
+        assert "Attempted path" in output and "not_attempted" in output
+        assert "Intended path" in output and "/info" in output
+        assert "OSC writes" in output and "0" in output
+        assert "Network scan" in output and "not run" in output
 
     assert calls == []
 
@@ -350,13 +352,13 @@ def test_setup_save_confirmation_runs_probe_and_save(monkeypatch, tmp_path):
         result,
         input_func=lambda prompt: next(answers),
     )
-    payload = json.loads(output.split("\n", 1)[1])
 
     assert stop is False
     assert calls and calls[0]["confirm_save"] is True
-    assert payload["attempted_path"] == "/info"
-    assert payload["scan_attempted"] is False
-    assert payload["osc_writes_sent"] == 0
+    assert "SETUP RESULT" in output
+    assert "Attempted path" in output and "/info" in output
+    assert "Network scan" in output and "not run" in output
+    assert "OSC writes" in output and "0" in output
 
 
 def test_unknown_command_does_not_exit_and_local_actions_are_in_process(tmp_path):
@@ -368,8 +370,8 @@ def test_unknown_command_does_not_exit_and_local_actions_are_in_process(tmp_path
 
     assert unknown == "Unknown command. Type / to view allowed commands."
     assert stop is False
-    assert health_stop is False and "osc_writes_sent" in health
-    assert doctor_stop is False and "console_probe" in doctor and "not_run" in doctor
+    assert health_stop is False and "OSC writes" in health
+    assert doctor_stop is False and "Console probe" in doctor and "not_run" in doctor
 
 
 def test_status_is_honest_and_does_not_treat_configured_url_as_reachable(tmp_path):
@@ -397,8 +399,9 @@ def test_status_is_honest_and_does_not_treat_configured_url_as_reachable(tmp_pat
     assert "Source archive" in status and "not_checked" in status
     assert "Repository" in status and "https://github.com/DXBMARK/m32-bridge" in status
     assert "Repository" in status and "https://github.com/DXBMARK/m32-bridge/archive" not in status
-    assert "Source configuration" in main and "configured: github source archive" in main
-    assert "Reachability" in main and "not_checked" in main
+    assert "INSTALLER" in main and "Source" in main
+    assert "Source configuration" not in main
+    assert "Reachability" not in main
     assert "configured_for_github_archive" not in main
     assert "Hardware verified" in status and "false" in status
     assert "OSC writes sent" in status and "0" in status

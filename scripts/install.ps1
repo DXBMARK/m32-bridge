@@ -142,7 +142,8 @@ function Show-MissingUvWizard($Payload) {
         Write-Output "`e[48;2;36;57;71m`e[2J`e[H`e[38;2;249;126;26m"
     }
     (@"
-DXBMARK M32 BRIDGE INSTALLER
+X32-BRIDGE MCP INSTALLER
+Powered by DXBMARK LLC
 #  ______  ______  __  __    _    ____  _  __
 # |  _ \ \/ / __ )|  \/  |  / \  |  _ \| |/ / LLC
 # | | | \  /|  _ \| |\/| | / _ \ | |_) | ' /

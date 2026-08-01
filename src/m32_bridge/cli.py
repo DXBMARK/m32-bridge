@@ -200,7 +200,64 @@ def setup_runtime(
             exception_type=None,
             osc_writes_sent=0,
             hardware_verified=False,
-            production_live_ready=False,
+                production_live_ready=False,
+        )
+
+    saved = False
+    persistence_verified = False
+    resolved_config_path = config_path or (default_project_config_path() if config_scope == "project_dev_test" else default_user_config_path())
+    if save and confirm_save:
+        try:
+            save_runtime_config(
+                path=resolved_config_path,
+                host=str(host).strip(),
+                port=port,
+                intended_target_type=target_type,
+                label=label,
+                environment=environment,
+                config_scope=config_scope,
+            )
+        except OSError as exc:
+            payload = runtime_output(
+                ok=False,
+                status="CONFIG_WRITE_FAILED",
+                error_code="CONFIG_WRITE_FAILED",
+                message="Runtime configuration could not be saved.",
+                configured_host=str(host).strip(),
+                configured_port=port,
+                attempted_path=None,
+                latency_ms=None,
+                exception_type=type(exc).__name__,
+                connected=False,
+                osc_writes_sent=0,
+                hardware_verified=False,
+                production_live_ready=False,
+            )
+            payload.update(
+                {
+                    "saved": False,
+                    "config_saved": False,
+                    "config_path": str(resolved_config_path),
+                    "persistence_verified": False,
+                    "probe_attempted": False,
+                    "endpoint_verified": False,
+                    "config_not_written": True,
+                    "scan_attempted": False,
+                }
+            )
+            return payload
+        saved = True
+        resolved = resolve_runtime_config(
+            cli_args={},
+            environ={},
+            user_config_path=resolved_config_path,
+            allow_project_local=False,
+        )
+        persistence_verified = bool(
+            resolved.effective_host == str(host).strip()
+            and resolved.effective_port == port
+            and resolved.effective_intended_target_type == target_type
+            and (label is None or resolved.effective_label == label)
         )
 
     probe = probe_result or setup_info_probe(str(host).strip(), port, timeout=timeout)
@@ -210,11 +267,11 @@ def setup_runtime(
     exception_type = probe.get("exception_type")
 
     if connected and response_address is not None and _response_address_mismatch(response_address, str(host).strip(), port):
-        return runtime_output(
-            ok=False,
-            status="UNEXPECTED_RESPONSE_ADDRESS",
-            error_code="UNEXPECTED_RESPONSE_ADDRESS",
-            message="The /info response came from an unexpected address.",
+        payload = runtime_output(
+            ok=bool(saved),
+            status="SAVED_UNEXPECTED_RESPONSE_ADDRESS" if saved else "UNEXPECTED_RESPONSE_ADDRESS",
+            error_code=None if saved else "UNEXPECTED_RESPONSE_ADDRESS",
+            message="Configuration was saved, but the /info response came from an unexpected address." if saved else "The /info response came from an unexpected address.",
             configured_host=str(host).strip(),
             configured_port=port,
             attempted_path="/info",
@@ -226,14 +283,26 @@ def setup_runtime(
             hardware_verified=False,
             production_live_ready=False,
         )
+        payload.update(
+            {
+                "saved": saved,
+                "config_saved": saved,
+                "config_path": str(resolved_config_path),
+                "persistence_verified": persistence_verified,
+                "probe_attempted": True,
+                "endpoint_verified": False,
+                "scan_attempted": False,
+            }
+        )
+        return payload
 
     if not connected:
         error_code = "CONNECT_TIMEOUT" if exception_type and "Timeout" in str(exception_type) else "NOT_CONNECTED"
-        return runtime_output(
-            ok=False,
-            status="NOT_CONNECTED",
-            error_code=error_code,
-            message="The configured endpoint did not respond to /info.",
+        payload = runtime_output(
+            ok=bool(saved),
+            status="SAVED_NOT_CONNECTED" if saved else "NOT_CONNECTED",
+            error_code=None if saved else error_code,
+            message="Configuration was saved successfully. The endpoint is currently unavailable or did not respond." if saved else "The configured endpoint did not respond to /info.",
             configured_host=str(host).strip(),
             configured_port=port,
             attempted_path="/info",
@@ -245,20 +314,19 @@ def setup_runtime(
             hardware_verified=False,
             production_live_ready=False,
         )
-
-    saved = False
-    resolved_config_path = config_path or (default_project_config_path() if config_scope == "project_dev_test" else default_user_config_path())
-    if save and confirm_save:
-        save_runtime_config(
-            path=resolved_config_path,
-            host=str(host).strip(),
-            port=port,
-            intended_target_type=target_type,
-            label=label,
-            environment=environment,
-            config_scope=config_scope,
+        payload.update(
+            {
+                "saved": saved,
+                "config_saved": saved,
+                "config_path": str(resolved_config_path),
+                "persistence_verified": persistence_verified,
+                "probe_attempted": True,
+                "endpoint_verified": False,
+                "verification_status": error_code,
+                "scan_attempted": False,
+            }
         )
-        saved = True
+        return payload
 
     payload = runtime_output(
         ok=True,
@@ -280,7 +348,12 @@ def setup_runtime(
         recommendations=["Run m32-bridge mcp-server after saving config."],
     )
     payload["saved"] = saved
+    payload["config_saved"] = saved
     payload["config_path"] = str(resolved_config_path)
+    payload["persistence_verified"] = persistence_verified if saved else False
+    payload["probe_attempted"] = True
+    payload["endpoint_verified"] = True
+    payload["scan_attempted"] = False
     return payload
 
 
@@ -634,8 +707,58 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(_base_result(args.command, "error") | {"error": exc.__class__.__name__}), file=sys.stdout)
         return 1
 
-    print(json.dumps(result, sort_keys=True), file=sys.stdout)
+    if args.command == "mcp-config" and not args.json:
+        print(_render_mcp_config_cli_text(result), file=sys.stdout)
+    else:
+        print(json.dumps(result, sort_keys=True), file=sys.stdout)
     return 0 if result.get("ok") is True or result.get("status") == "ok" else 1
+
+
+def _render_mcp_config_cli_text(payload: dict[str, Any]) -> str:
+    lines = [
+        "MCP CLIENT SETUP",
+        "=" * 60,
+        f"Product               : {payload['product']}",
+        f"Version               : {payload['version']}",
+        f"Launcher              : {payload['launcher_path']}",
+        f"Runtime configuration : {payload['runtime_config_path']}",
+        f"Transport             : {payload['transport']}",
+        f"Environment variables : {payload['environment_variables']}",
+    ]
+    for profile in payload.get("client_guidance", []):
+        lines.extend(
+            [
+                "",
+                str(profile["display_name"]).upper(),
+                "-" * 60,
+                f"Display name         : {profile['display_name']}",
+                f"Server name          : {payload['server_name']}",
+                f"Command              : {profile['command'] or 'not available'}",
+                f"Arguments            : {json.dumps(profile['args'])}",
+                f"Environment          : {json.dumps(profile['environment'], sort_keys=True) if profile['environment'] else 'none required'}",
+                f"Transport            : {profile['transport']}",
+                f"Config location hint : {profile['config_location_hint']}",
+            ]
+        )
+        if profile.get("generated_snippet") is not None:
+            lines.extend(["Generated snippet:", *json.dumps(profile["generated_snippet"], indent=2).splitlines()])
+        lines.append("Verification steps:")
+        lines.extend(f"  - {step}" for step in profile.get("verification_steps", []))
+        lines.append("Warnings / limitations:")
+        lines.extend(f"  - {note}" for note in profile.get("notes", []))
+        lines.append(f"  - {profile['official_support_status']}")
+    lines.extend(
+        [
+            "",
+            "SAFETY",
+            "-" * 60,
+            f"Client config write : {str(payload['config_written']).lower()}",
+            f"Network scan        : {str(payload['network_scan']).lower()}",
+            f"Console probe       : {payload['console_probe']}",
+            f"OSC writes          : {payload['osc_writes_sent']}",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _run_command(args: argparse.Namespace) -> dict[str, Any]:
@@ -676,6 +799,15 @@ def _run_command(args: argparse.Namespace) -> dict[str, Any]:
         payload = render_post_install_verification(environ=dict(os.environ), home=args.home, local_app_data=args.local_app_data)
         payload["status"] = "install_verified"
         return payload
+    if args.command == "mcp-config":
+        from m32_bridge.installer.mcp_guidance import render_mcp_guidance
+        from m32_bridge.installer.tty_app import application_version
+
+        return render_mcp_guidance(
+            environ=dict(os.environ),
+            client=args.client,
+            version=application_version(),
+        )
     if args.command == "get-info":
         return get_info_runtime(host=args.host, port=args.port, timeout=args.timeout)
     if args.command == "detect-device":
@@ -729,6 +861,10 @@ def _build_parser() -> argparse.ArgumentParser:
     verify_install_parser.add_argument("--json", action="store_true")
     verify_install_parser.add_argument("--home", type=Path, default=None)
     verify_install_parser.add_argument("--local-app-data", type=Path, default=None)
+
+    mcp_config_parser = subparsers.add_parser("mcp-config")
+    mcp_config_parser.add_argument("--client", choices=("claude", "codex", "gemini", "antigravity", "chatgpt", "generic", "all"), default="all")
+    mcp_config_parser.add_argument("--json", action="store_true")
 
     setup_parser = subparsers.add_parser("setup")
     setup_parser.add_argument("--host", default=None)
@@ -848,6 +984,10 @@ def _config_resolution_dict(resolution: Any) -> dict[str, Any]:
         "message": resolution.message,
         "default_scan_attempted": resolution.default_scan_attempted,
         "guessed_host": resolution.guessed_host,
+        "effective_label": resolution.effective_label,
+        "effective_environment": resolution.effective_environment,
+        "effective_intended_target_type": resolution.effective_intended_target_type,
+        "config_path": str(resolution.config_path) if resolution.config_path else None,
     }
 
 

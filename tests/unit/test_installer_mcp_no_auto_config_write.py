@@ -41,6 +41,6 @@ def test_installer_apply_success_includes_manual_copy_mcp_guidance(monkeypatch, 
 
     assert result["ok"] is True
     assert result["mcp_guidance"]["manual_copy_only"] is True
-    assert result["mcp_guidance"]["command"] == "m32-bridge"
+    assert result["mcp_guidance"]["command"] == str(tmp_path / "home" / ".local" / "bin" / "m32-bridge")
     assert result["mcp_guidance"]["args"] == ["mcp-server"]
     assert result["mcp_guidance"]["config_written"] is False

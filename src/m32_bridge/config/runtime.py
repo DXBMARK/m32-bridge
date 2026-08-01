@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -54,6 +56,10 @@ class ConfigResolution:
     message: str = ""
     default_scan_attempted: bool = False
     guessed_host: str | None = None
+    effective_label: str | None = None
+    effective_environment: str | None = None
+    effective_intended_target_type: str = "unknown"
+    config_path: Path | None = None
 
 
 def default_user_config_path() -> Path:
@@ -95,25 +101,52 @@ def resolve_runtime_config(
 
     host: str | None = None
     port: int | None = None
+    label: str | None = None
+    environment: str | None = None
+    intended_target_type = "unknown"
+    config_path: Path | None = None
     source_by_field: dict[str, str] = {}
 
     if allow_project_local and project_config:
         host = _config_host(project_config)
         port = _config_port(project_config)
+        label = _string_or_none(project_config.get("label"))
+        environment = _string_or_none(project_config.get("environment"))
+        project_has_target_type = "intended_target_type" in project_config
+        intended_target_type = _target_type_or_unknown(project_config.get("intended_target_type"))
+        config_path = project_path
         if host:
             source_by_field["host"] = "project_local_dev_test"
         if port is not None:
             source_by_field["port"] = "project_local_dev_test"
+        if label:
+            source_by_field["label"] = "project_local_dev_test"
+        if project_has_target_type:
+            source_by_field["intended_target_type"] = "project_local_dev_test"
 
     if user_config:
         user_host = _config_host(user_config)
         user_port = _config_port(user_config)
+        user_label = _string_or_none(user_config.get("label"))
+        user_environment = _string_or_none(user_config.get("environment"))
+        user_has_target_type = "intended_target_type" in user_config
+        user_target_type = _target_type_or_unknown(user_config.get("intended_target_type"))
+        config_path = user_path
         if user_host:
             host = user_host
             source_by_field["host"] = "user_config"
         if user_port is not None:
             port = user_port
             source_by_field["port"] = "user_config"
+        if user_label is not None:
+            label = user_label
+            source_by_field["label"] = "user_config"
+        if user_environment is not None:
+            environment = user_environment
+            source_by_field["environment"] = "user_config"
+        if user_has_target_type:
+            intended_target_type = user_target_type
+            source_by_field["intended_target_type"] = "user_config"
 
     env_host = _string_or_none(env.get("M32_CONSOLE_HOST"))
     env_port = _int_or_none(env.get("M32_CONSOLE_PORT"))
@@ -149,6 +182,10 @@ def resolve_runtime_config(
         project_local_config_used=bool(allow_project_local and project_config and source_by_field.get("host") == "project_local_dev_test"),
         error_code="NO_CONSOLE_HOST" if missing_host else None,
         message="No console host is configured. Run m32-bridge setup." if missing_host else "",
+        effective_label=label,
+        effective_environment=environment,
+        effective_intended_target_type=intended_target_type,
+        config_path=config_path,
     )
 
 
@@ -195,7 +232,30 @@ def save_runtime_config(
         payload["label"] = label
     if environment:
         payload["environment"] = environment
-    path.write_text(yaml.safe_dump(payload, sort_keys=True), encoding="utf-8")
+    serialized = yaml.safe_dump(payload, sort_keys=True)
+    temp_name: str | None = None
+    fd: int | None = None
+    try:
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = None
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+        temp_name = None
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if temp_name and os.path.exists(temp_name):
+            os.unlink(temp_name)
 
 
 def scan_for_console_hosts(*_args: Any, **_kwargs: Any) -> list[str]:
@@ -241,3 +301,8 @@ def _int_or_none(value: object) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _target_type_or_unknown(value: object) -> str:
+    text = _string_or_none(value) or "unknown"
+    return text if text in VALID_TARGET_TYPES else "unknown"

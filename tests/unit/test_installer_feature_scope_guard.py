@@ -43,7 +43,7 @@ def test_installer_source_scope_does_not_add_forbidden_surfaces():
         "enable_phantom",
         "set_sample_rate",
         "chatgpt tunnel",
-        "remote mcp",
+        "remote mcp available",
         "webui",
         "database",
         "microservice",

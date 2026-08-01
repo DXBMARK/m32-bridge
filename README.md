@@ -1,262 +1,335 @@
-# M32 MCP Bridge
+# X32-Bridge MCP
 
-Local Python 3.12 modular monolith for a safety-first MCP bridge to a Midas
-M32/X32-family console over OSC/UDP.
+Powered by DXBMARK LLC
 
-## MVP Boundaries
+## What It Is
 
-- Claude Desktop over MCP stdio is the primary host path.
-- Optional ChatGPT transport stays disabled by default. The only documented
-  ChatGPT path for this MVP is Secure MCP Tunnel.
-- No custom WebUI, no AI backend integration, no database, no microservices, no
-  M32-Edit control, no raw OSC tools, and no arbitrary-path tools are part of
-  the MVP.
-- Emulator results are never hardware verification.
-- Production, Live readiness, and `hardware_verified` claims require the final
-  real-M32 Hardware Acceptance suite.
+X32-Bridge MCP is a local safety-first MCP bridge for Midas M32 and X32-family digital consoles using OSC.
 
-## Safety Rules
+It runs under local operator control and exposes read, analysis, and recommendation workflows to supported MCP hosts. Installer and setup flows are conservative: they do not scan the network, do not send `/set`, do not send OSC writes, and do not imply hardware verification or production readiness.
 
-The console or emulator endpoint is the source of truth for operational state.
-Manual console changes take priority over automation.
+## Current Version
 
-Every state-changing operation must follow:
+- Product version: `0.1.0`
+- Package: `m32-mcp-bridge`
+- CLI: `m32-bridge`
+- Python range: `>=3.11,<3.14`
+- Approved managed runtime: CPython `3.13.x`
+- Primary MCP transport: local `stdio`
+- Runtime configuration: `~/.m32-bridge/runtime.yaml`
+
+## Installation
+
+Use the installer scripts from this project. They install user-local application files and a stable `m32-bridge` launcher without administrator access or system Python modification.
+
+### macOS / Linux
+
+```sh
+sh scripts/install.sh
+```
+
+Dry run:
+
+```sh
+sh scripts/install.sh --dry-run
+```
+
+### Windows
+
+```powershell
+.\scripts\install.ps1
+```
+
+Dry run:
+
+```powershell
+.\scripts\install.ps1 -DryRun
+```
+
+## First Run
+
+Open the installer TTY and run:
 
 ```text
-Read -> Proposal -> MCP Host Human Confirmation -> Policy Check -> Write -> Readback -> Audit
+/setup
 ```
 
-Write tools must not be configured as Always Allow. Do not add model-supplied
-approval tokens.
+Setup asks for:
 
-`EMERGENCY` is AI write-lock only: it stops automation, cancels pending
-proposals, blocks all AI console writes, blocks AI mute, blocks AI rollback, and
-returns to `OBSERVE` only after reconciliation. No AI-controlled mute, rollback,
-or console write is allowed in `EMERGENCY`.
+- Console IP: the known address configured on the console itself.
+- Port: default `10023`.
+- Label: optional local name such as `Main Console`.
+- Intended target: physical console, emulator/test endpoint, or unknown.
 
-R3 operations remain `SOUNDCHECK`-only. R4 operations remain blocked.
+`SAVE` stores the configuration first, then runs one read-only `/info` verification. If the endpoint is offline, the configuration remains saved and can be verified later with `/get-info` or `/verify-device`.
 
-## Development Gates
+## Runtime Configuration
 
-Run gates in this order:
+Default file:
 
 ```text
-Unit/Codec -> Fake M32 -> External Emulator -> MCP Inspector and Claude Desktop -> Windows/macOS -> Hardware Acceptance
+~/.m32-bridge/runtime.yaml
 ```
 
-Current Unit/Codec gate command:
+Precedence:
+
+1. explicit CLI values
+2. environment overrides
+3. user runtime config
+4. project-local config where explicitly allowed for development/testing
+5. none
+
+The installer does not guess this computer's local IP address and does not scan subnets.
+
+## Running the MCP Server
+
+For normal installed use, MCP clients should launch the installed user-local launcher:
 
 ```sh
-uv run --extra test python -m pytest tests/unit tests/property
+m32-bridge mcp-server
 ```
 
-Fake M32 connection proof:
+Do not configure normal user clients to run development checkout launchers. Use development launch forms only for development-only testing.
+
+## MCP Client Setup
+
+Generate current local guidance:
 
 ```sh
-uv run --extra test python -m pytest tests/integration_fake_m32/test_connect_live_state.py tests/integration_fake_m32/test_connection_fail_closed.py
+m32-bridge mcp-config
 ```
 
-This proof connects to the project-owned Fake M32, renews `/xremote`, reads
-Channel 1 headamp gain at `+10.0 dB`, injects a manual change to `+6.0 dB`, and
-verifies the bridge observes the newer revision with an emulator source label.
-
-The external emulator gate is required before MCP readiness claims, but it still
-does not grant hardware verification.
-
-Do not redistribute emulator binary artifacts from this project. Configure an
-external local emulator only when its license and local usage are understood.
-
-## Optional ChatGPT Transport
-
-Claude Desktop over MCP stdio is the primary MVP path. ChatGPT connectivity is
-optional and disabled by default.
-
-The optional secondary MCP transport is guarded for Secure MCP Tunnel use only.
-It must not expose the OSC endpoint, must not provide raw OSC or arbitrary-path
-tools, and must bind only to loopback or private interfaces if explicitly
-enabled by configuration.
-
-There is no production ChatGPT enablement in the current MVP. Do not run a
-production tunnel, public bind, or Internet-exposed OSC endpoint from this
-project.
-
-## Operator Controls
-
-The local operator controls are command-line tools. They are not a WebUI and do
-not add raw OSC, arbitrary-path, or approval-token surfaces.
+Machine-readable output:
 
 ```sh
-py -m m32_bridge health
-py -m m32_bridge doctor
-py -m m32_bridge snapshot
-py -m m32_bridge verify-connection
-py -m m32_bridge audit-tail
+m32-bridge mcp-config --json
 ```
 
-Each command writes structured JSON to stdout. Diagnostics and process errors go
-to stderr, and non-zero exit codes indicate failure, denial, or configuration
-errors.
+The generated profiles are manual-copy only. X32-Bridge MCP never edits Claude, Codex, Gemini, Antigravity, ChatGPT, or other MCP client configuration files automatically.
 
-These controls are local MVP operator utilities only. They do not imply
-production readiness, Live readiness, or hardware verification.
+### Claude Desktop
 
-## Local MCP Validation
+Use the generated absolute launcher path from `m32-bridge mcp-config`. The shape is:
 
-The local MCP server entry point is the Python module:
+```json
+{
+  "mcpServers": {
+    "x32-bridge-mcp": {
+      "command": "/absolute/path/to/m32-bridge",
+      "args": ["mcp-server"]
+    }
+  }
+}
+```
+
+Steps:
+
+1. Open Claude Desktop.
+2. Open Settings > Developer.
+3. Select Edit Config.
+4. Merge the `x32-bridge-mcp` entry into the existing `mcpServers` object.
+5. Do not replace unrelated existing servers.
+6. Save.
+7. Restart Claude Desktop.
+8. Confirm the server shows Running.
+9. Use View Logs if startup fails.
+
+Do not paste a second top-level `mcpServers` object. Merge the entry into the existing object.
+
+### Codex
+
+This project does not define a canonical Codex config file path or schema. Use these values through the MCP configuration surface provided by your installed Codex version:
+
+```text
+Server name : x32-bridge-mcp
+Transport   : stdio
+Command     : absolute launcher path from m32-bridge mcp-config
+Arguments   : mcp-server
+Environment : none required
+```
+
+### Gemini CLI
+
+Gemini CLI local stdio profile:
+
+```json
+{
+  "mcpServers": {
+    "x32-bridge-mcp": {
+      "command": "/absolute/path/to/m32-bridge",
+      "args": ["mcp-server"]
+    }
+  }
+}
+```
+
+Configuration location hints:
+
+- User configuration: `~/.gemini/settings.json`
+- Project configuration: `.gemini/settings.json`
+
+Merge the server into `mcpServers`, restart Gemini CLI or refresh MCP servers if supported, then run `/mcp list` and confirm `x32-bridge-mcp` is Ready. For this local stdio profile, use `command` and `args`, not `httpUrl`.
+
+### Antigravity
+
+Antigravity MCP support is client/version dependent. Use generic local stdio values and verify the schema in the installed version:
+
+```text
+Server name : x32-bridge-mcp
+Transport   : stdio
+Command     : absolute launcher path from m32-bridge mcp-config
+Arguments   : mcp-server
+Environment : none required
+```
+
+Field names and config locations may differ between Antigravity releases.
+
+### ChatGPT
+
+ChatGPT does not accept a direct local stdio command entry for this local installer.
+Direct local stdio is not available in ChatGPT.
+
+```text
+Direct local stdio connection : not available
+Required transport            : remote MCP
+Private/local deployment      : Secure MCP Tunnel or another approved remote deployment method
+```
+
+The local command `m32-bridge mcp-server` cannot be pasted directly into ChatGPT as a local command entry. Current local installer readiness does not imply ChatGPT remote readiness. Do not create a localhost URL, public tunnel, OAuth flow, webhook, or port-forwarding setup from this local installer pass.
+
+### Other / Generic MCP Clients
+
+Generic local stdio values:
+
+```text
+Server name : x32-bridge-mcp
+Transport   : stdio
+Command     : absolute launcher path from m32-bridge mcp-config
+Arguments   : ["mcp-server"]
+Environment : {}
+```
+
+Use this only in MCP clients that support local command-based stdio servers.
+
+## Why No Host/Port in Client Config
+
+Normal MCP client profiles do not include `M32_CONSOLE_HOST`, `M32_CONSOLE_PORT`, or `M32_CONFIG`.
+
+The saved runtime configuration is the source of truth:
+
+```text
+~/.m32-bridge/runtime.yaml
+```
+
+Duplicating host or port in client environment variables can make clients use stale endpoints. Environment overrides take precedence over saved runtime configuration and should be used only intentionally.
+
+## Environment Variables
+
+Normal installed use requires no environment variables.
+
+Optional advanced overrides:
+
+- `M32_CONSOLE_HOST`: overrides the saved runtime host.
+- `M32_CONSOLE_PORT`: overrides the saved runtime port.
+- `M32_CONFIG`: custom config path or mode where supported by the calling environment.
+
+These overrides are advanced and can make client behavior differ from `/status` or `config show` expectations.
+
+## Commands
 
 ```sh
-py -m m32_bridge
+m32-bridge health
+m32-bridge setup
+m32-bridge get-info
+m32-bridge detect-device
+m32-bridge doctor-runtime
+m32-bridge config show
+m32-bridge mcp-config
+m32-bridge mcp-server
 ```
 
-For Claude Desktop local validation, configure a local stdio MCP server command
-that runs `py -m m32_bridge`. Use a local config profile equivalent to
-`config.example.yaml`: target `127.0.0.1`, stdio enabled, secondary HTTP
-transport disabled, write lock enabled on startup, and no raw OSC or
-arbitrary-path tools.
+## TTY Commands
 
-Use MCP Inspector locally against the same stdio command to verify tool
-inventory, metadata, structured outputs, denials, and stdout/stderr protocol
-cleanliness. Inspector validation is local developer validation only.
+```text
+/help
+/contact
+/mcp-config
+/status
+/health
+/setup
+/get-info
+/verify-device
+/doctor-runtime
+/clear
+/exit
+```
 
-Claude Desktop validation is also local validation only. It does not mean
-production readiness, Live readiness, or hardware verification.
+## Safety Model
 
-The External X32 Emulator remains optional for the separate external emulator
-gate only. Real hardware acceptance is still required later before any real
-console or live-use claim.
+- Network scan: not used.
+- OSC writes in installer/setup: `0`.
+- `/set` in installer/setup: not sent.
+- Administrator access: not required.
+- System Python: unchanged.
+- Managed Python: user-local through `uv`.
+- Intended target: operator intent only, not hardware verification.
+- Hardware verification: separate evidence gate.
+- Production readiness: not implied by installer, setup, emulator, or `/info` response.
 
-## Cross-Platform Release Gate
+## Troubleshooting
 
-Windows and macOS evidence is required before an MVP release claim. These are
-local development gates, not production or Live instructions.
+Launcher missing:
 
-Windows commands:
+- Run the installer again.
+- Run `m32-bridge doctor-runtime`.
+- Confirm `~/.local/bin` or the Windows user-local launcher directory is visible in PATH.
+
+Server not Running:
+
+- Confirm the client command is the installed launcher path.
+- Confirm args are exactly `["mcp-server"]`.
+- Use Claude Desktop View Logs or the equivalent client log surface.
+
+Stale environment variables:
+
+- Check `M32_CONSOLE_HOST`, `M32_CONSOLE_PORT`, and `M32_CONFIG`.
+- Remove overrides from client config unless they are intentional.
+
+Wrong console IP:
+
+- Run `/setup` or `m32-bridge setup`.
+- Store the known console endpoint.
+- Run `/get-info` when the console is online.
+
+Config source inspection:
+
+- Run `/status`.
+- Run `m32-bridge config show`.
+
+Gemini CLI:
+
+- Run `/mcp list`.
+- Confirm `x32-bridge-mcp` is Ready.
+
+ChatGPT:
+
+- Direct local stdio is not available.
+- Use a future remote MCP deployment plan such as Secure MCP Tunnel only when explicitly implemented and approved.
+
+## Development-Only Setup
+
+Development checkouts may run from a project environment during local development, but this is not the normal installed MCP client setup:
 
 ```sh
-py -m compileall src tests
-py -m pytest tests/unit tests/property -q -p no:cacheprovider
-py -m pytest tests/integration_fake_m32 -q -p no:cacheprovider
-py -m pytest tests/e2e_mcp -q -p no:cacheprovider
-py -m m32_bridge health
+uv run --frozen --python 3.13 python -m m32_bridge mcp-server
 ```
 
-macOS commands:
+Do not use this form for normal installed clients. User clients should use the installed `m32-bridge` launcher.
 
-```sh
-py -m compileall src tests
-py -m pytest tests/unit tests/property -q -p no:cacheprovider
-py -m pytest tests/integration_fake_m32 -q -p no:cacheprovider
-py -m pytest tests/e2e_mcp -q -p no:cacheprovider
-py -m m32_bridge health
-py -m m32_bridge doctor
-```
+## Support
 
-Evidence for each platform must include the platform name, Python 3.12 version,
-the exact `py -m` commands, exit codes, and JSON output from `py -m m32_bridge
-health`.
+DXBMARK LLC
 
-Windows smoke does not count as passed unless it is run on a real Windows
-runtime. macOS smoke does not count as passed unless it is run on a real macOS
-runtime.
-
-This gate does not run Hardware Acceptance and does not replace the later real
-M32 hardware gate.
-
-## Hardware Acceptance Evidence
-
-Hardware Acceptance is manual and gated. It requires real M32 evidence artifacts
-before any `hardware_verified` claim can be considered. Fake M32 and external
-emulator results are never hardware evidence.
-
-Required readiness evidence:
-
-- identity
-- firmware
-- expansion card
-- clock
-- AES50
-- card sync
-- routing
-- network isolation
-
-Required manual-change evidence:
-
-- initial read of the real console value
-- manual gain or fader change on the physical console
-- second read of the changed value
-- changed revision, timestamp, and source metadata
-
-Required gated safe-write evidence before real console writes:
-
-- isolated safe write case
-- readback
-- manual conflict
-- disconnect/reconnect
-- targeted rollback
-
-Hardware tests remain `pending` or `not_available` when real hardware evidence is
-absent. Do not substitute Fake M32 or the External X32 Emulator for a real M32.
-
-## External Emulator Gate
-
-The external emulator gate uses Patrick-Gilles Maillot X32 Emulator as the
-approved emulator for this MVP gate:
-
-- Primary reference: https://sites.google.com/site/patrickmaillot/x32
-- Supporting source/tools repository: https://github.com/pmaillot/X32-Behringer
-
-Run the emulator outside this repository. Do not copy or redistribute emulator
-binaries in this project. Configure the bridge test target with environment
-variables:
-
-```sh
-export M32_EXTERNAL_EMULATOR_HOST=127.0.0.1
-export M32_EXTERNAL_EMULATOR_PORT=10023
-```
-
-UDP `10023` is the usual X32/M32 OSC control port, but the actual port shown by
-the running emulator should be used.
-
-The gate validates OSC behavior only:
-
-- read-only `/info` identity
-- leaf reads such as channel fader and channel name
-- safe write, readback, and targeted rollback through the bridge proposal,
-  MCP-host-confirmed executor, validated operation boundary, and readback path
-
-Known Patrick X32 Emulator limitations observed in this gate:
-
-- It is OSC-only and does not emulate Audio, MIDI, or USB behavior.
-- `/node` may return `unsupported_or_timeout`.
-- Direct `/meters` requests may return `unsupported_or_timeout`.
-- Some leaf reads may not include revision metadata.
-
-External emulator success never grants `hardware_verified`, does not authorize
-production or Live use, and does not replace Hardware Acceptance with a real
-M32.
-
-## MVP Quality Gate Evidence
-
-Evidence captured on 2026-07-26 from a local macOS (`Darwin`) development
-process. `py` was provided by a temporary `/tmp/py` shim because it was not
-available in `PATH`. Patrick-Gilles Maillot X32 Emulator was running and reported
-`Listening to port: 10023, X32 IP = 192.168.8.88`.
-
-All gates below preserve `hardware_verified=False` unless real hardware
-acceptance evidence is explicitly present. This evidence does not claim
-production readiness or Live readiness.
-
-| Gate | Command | Status | Tests | Evidence notes |
-| --- | --- | --- | ---: | --- |
-| Compile | `py -m compileall src tests` | passed | n/a | Source and tests compiled. |
-| Unit and property | `py -m pytest tests/unit tests/property -q -p no:cacheprovider` | passed | 84 | Re-run with local UDP permission because two unit tests start Fake M32 on loopback. |
-| Fake M32 integration | `py -m pytest tests/integration_fake_m32 -q -p no:cacheprovider` | passed | 46 | Re-run with local UDP permission for Fake M32 loopback bind. Fake M32 is not hardware evidence. |
-| External emulator | `py -m pytest tests/integration_external_emulator -q -p no:cacheprovider` | passed | 8 | Patrick X32 Emulator target: `M32_EXTERNAL_EMULATOR_HOST=192.168.8.88`, `M32_EXTERNAL_EMULATOR_PORT=10023`. External emulator remains `hardware_verified=False`. |
-| MCP e2e | `py -m pytest tests/e2e_mcp -q -p no:cacheprovider` | passed | 43 | Re-run with local UDP permission because scripted MCP tests start Fake M32. Claude Desktop app was not launched. |
-| Cross-platform | `py -m pytest tests/cross_platform -q -p no:cacheprovider` | passed | 5 | macOS smoke ran on `Darwin`; Windows smoke reported `not_run_on_this_platform` and does not count as a real Windows pass. |
-| Hardware acceptance | `py -m pytest tests/hardware_acceptance -q -p no:cacheprovider` | pending/not_available | 13 | Tests passed by verifying structured `pending`/`not_available` behavior without real M32 evidence. No real hardware was used. |
-| Final safety review | `py -m pytest tests/e2e_mcp/test_tool_inventory.py tests/unit/test_scope_guard.py tests/integration_fake_m32/test_write_audit.py tests/integration_fake_m32/test_emergency_lock.py -q -p no:cacheprovider` | passed | 17 | Re-run with local UDP permission for Fake M32 loopback bind. Confirms no prohibited MCP tools, scope guard, audit coverage, and EMERGENCY lock behavior. |
-
-Hardware Acceptance remains unresolved for real M32 operation. The current
-hardware gate result is `pending`/`not_available` until a physical M32 evidence
-artifact covers readiness, manual change challenge, and gated safe-write checks.
+- Website: https://www.dxbmark.com
+- Support: support@dxbmark.com
+- Phone / WhatsApp: +971505121583
