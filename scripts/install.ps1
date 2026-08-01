@@ -30,6 +30,7 @@ Param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $script:RuntimeBootstrapSucceeded = $false
+$script:UvBin = $null
 $env:M32_POWERSHELL_VERSION = $PSVersionTable.PSVersion.ToString()
 # Keep these values in parity with src/m32_bridge/installer/runtime_manager.py.
 $ApprovedPythonMinor = "3.13"
@@ -76,9 +77,11 @@ Options:
   -Platform windows_powershell|windows_cmd
   -TargetVersion <version>
 
-Installer commands:
-  /status /health /setup /get-info /verify-device /doctor-runtime
-  /contact /clear /exit
+Bootstrap commands:
+  /status /help /contact /clear /exit
+
+After installation:
+  /health /setup /get-info /verify-device /doctor-runtime /mcp-config
 
 Contact:
   Website                   : https://www.dxbmark.com
@@ -125,6 +128,16 @@ function Write-InstallerHeading([string]$Text) {
     }
 }
 
+function Get-TerminalColorMode {
+    if (-not (Test-InteractiveTty) -or $env:TERM -eq "dumb" -or -not [string]::IsNullOrEmpty($env:NO_COLOR)) {
+        return "none"
+    }
+    if ($env:COLORTERM -in @("truecolor", "24bit")) {
+        return "truecolor"
+    }
+    return "basic"
+}
+
 function Write-CanvasLine([string]$Text) {
     if (-not (Test-InteractiveTty)) {
         Write-Output $Text
@@ -132,14 +145,24 @@ function Write-CanvasLine([string]$Text) {
     }
     $width = [Console]::WindowWidth - 1
     if ($width -lt 20) { $width = 20 }
-    $line = if ($Text.Length -gt $width) { $Text.Substring(0, $width) } else { $Text.PadRight($width) }
-    Write-Output "`e[48;2;36;57;71m$line"
+    $mode = Get-TerminalColorMode
+    if ($mode -eq "truecolor") {
+        $line = if ($Text.Length -gt $width) { $Text.Substring(0, $width) } else { $Text.PadRight($width) }
+        Write-Output "`e[48;2;36;57;71m$line`e[0m"
+    } elseif ($mode -eq "basic") {
+        $line = if ($Text.Length -gt $width) { $Text.Substring(0, $width) } else { $Text }
+        Write-Output "`e[37m$line`e[0m"
+    } else {
+        Write-Output $Text
+    }
 }
 
 function Show-MissingUvWizard($Payload) {
     $mode = if ($DryRun) { "dry-run" } else { "status" }
-    if (Test-InteractiveTty) {
-        Write-Output "`e[48;2;36;57;71m`e[2J`e[H`e[38;2;249;126;26m"
+    if ((Get-TerminalColorMode) -eq "truecolor") {
+        Write-Output "`e[2J`e[H`e[38;2;249;126;26m"
+    } elseif ((Get-TerminalColorMode) -eq "basic") {
+        Write-Output "`e[2J`e[H`e[33m"
     }
     (@"
 X32-BRIDGE MCP INSTALLER
@@ -161,7 +184,11 @@ Download capability
   wget fallback: optional, not installed
   Manual fallback: available
   uv status: missing
+  managed Python state: not_installed
+  application installed state: not_installed
+  launcher state: not_installed
   Python strategy: CPython 3.13.x managed by uv; system Python unchanged; no global py required
+  Runtime config: not inspected until application runtime is ready
 
 Source Check
   install_source: $($Payload.install_source)
@@ -186,6 +213,8 @@ Safety
   no /set
   no OSC writes
   no IDE or MCP client config writes
+  network_scan=not_run
+  console_probe=not_run
 
 Required Actions
   INSTALL_UV_USER_LOCAL: Install uv in user space
@@ -193,7 +222,8 @@ Required Actions
     command: Invoke-RestMethod downloads the official installer to a temporary file; run only after exact INSTALL confirmation
     confirmation_required=true
 
-Quick Actions
+After installation
+  These commands become available after the managed application runtime is installed.
   /health          Check runtime and installation readiness
   /setup           Configure a known console endpoint
   /get-info        Read information from the configured endpoint
@@ -234,19 +264,33 @@ Options:
         "contact" { Show-InstallerContact }
         "/status" {
             "installer state: RUNTIME_SETUP_REQUIRED"
+            "OS: $($payload.platform)"
+            "architecture: $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)"
+            "shell: powershell"
             "uv: missing"
+            "managed Python: not_installed"
+            "application: not_installed"
+            "launcher: not_installed"
             "install source: $SourceKind"
             "Source configuration: configured: github source archive"
             "Reachability: not_checked"
-            "safety: osc_writes_sent=0, hardware_verified=false, production_live_ready=false"
+            "Runtime config: not inspected until application runtime is ready"
+            "safety: admin_required=false, system_python_unchanged=true, network_scan=not_run, console_probe=not_run, osc_writes_sent=0"
         }
         "status" {
             "installer state: RUNTIME_SETUP_REQUIRED"
+            "OS: $($payload.platform)"
+            "architecture: $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)"
+            "shell: powershell"
             "uv: missing"
+            "managed Python: not_installed"
+            "application: not_installed"
+            "launcher: not_installed"
             "install source: $SourceKind"
             "Source configuration: configured: github source archive"
             "Reachability: not_checked"
-            "safety: osc_writes_sent=0, hardware_verified=false, production_live_ready=false"
+            "Runtime config: not inspected until application runtime is ready"
+            "safety: admin_required=false, system_python_unchanged=true, network_scan=not_run, console_probe=not_run, osc_writes_sent=0"
         }
         "/clear" {
             Clear-Host
@@ -322,18 +366,13 @@ Type INSTALL to continue.
         Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $temporaryBase -Force -ErrorAction SilentlyContinue
     }
-    $uvCommand = Get-Command uv -ErrorAction SilentlyContinue
-    $uvPath = if ($null -ne $uvCommand) { $uvCommand.Source } else { $null }
-    if ([string]::IsNullOrEmpty($uvPath)) {
-        $candidate = Join-Path $env:USERPROFILE ".local\bin\uv.exe"
-        if (Test-Path $candidate) {
-            $uvPath = $candidate
-        }
-    }
-    if ([string]::IsNullOrEmpty($uvPath)) {
-        "uv was installed but could not be rediscovered. Open a new terminal or add the reported user-local path."
+    $uvPath = Join-Path $env:USERPROFILE ".local\bin\uv.exe"
+    if (-not (Test-Path $uvPath)) {
+        "uv installation completed but the expected user-local executable is unavailable: $uvPath"
         return
     }
+    $script:UvBin = $uvPath
+    $env:PATH = "$(Split-Path -Parent $uvPath);$env:PATH"
     & $uvPath --version
     $env:UV_MANAGED_PYTHON = "1"
     & $uvPath python install $ApprovedPythonMinor
@@ -371,9 +410,11 @@ $SourceRef = if ([string]::IsNullOrEmpty($env:M32_INSTALL_SOURCE_REF)) { "main" 
 $DefaultSourceUrl = "https://github.com/DXBMARK/m32-bridge/archive/refs/heads/main.zip"
 $SourceUrl = if ([string]::IsNullOrEmpty($env:M32_INSTALL_SOURCE_URL)) { $DefaultSourceUrl } else { $env:M32_INSTALL_SOURCE_URL }
 $SourceKind = "local_checkout"
+$BootstrapSourceRoot = $null
 if (-not (Test-Path (Join-Path $RepoRoot "src/m32_bridge")) -or -not (Test-Path (Join-Path $RepoRoot "pyproject.toml"))) {
     $SourceKind = "github_release_or_archive"
     $RepoRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("m32-bridge-bootstrap-" + $PID)
+    $BootstrapSourceRoot = $RepoRoot
 }
 
 function New-UvRequiredAction {
@@ -480,20 +521,23 @@ if (Test-InteractiveTty) {
 }
 
 $uvCommand = Get-Command uv -ErrorAction SilentlyContinue
+if ($null -ne $uvCommand) {
+    $script:UvBin = if ($uvCommand.PSObject.Properties.Name -contains "Source") { $uvCommand.Source } else { $uvCommand.FullName }
+}
 if ($null -eq $uvCommand -and -not $Json -and -not $DryRun -and (Test-InteractiveTty)) {
     $payload = Get-MissingUvPayload
     Show-MissingUvWizard $payload
     Read-MissingUvTtyCommand
     $uvCommand = Get-Command uv -ErrorAction SilentlyContinue
     if ($null -eq $uvCommand -and $script:RuntimeBootstrapSucceeded) {
-        $candidate = Join-Path $env:USERPROFILE ".local\bin\uv.exe"
-        if (Test-Path $candidate) {
-            $uvCommand = Get-Item $candidate
+        if (-not [string]::IsNullOrEmpty($script:UvBin) -and (Test-Path $script:UvBin)) {
+            $uvCommand = Get-Item $script:UvBin
         }
     }
 }
 
 if ($null -ne $uvCommand) {
+    try {
     if ($SourceKind -ne "local_checkout") {
         Initialize-RemoteSource
         if ([string]::IsNullOrEmpty($existingPythonPath)) {
@@ -509,8 +553,25 @@ if ($null -ne $uvCommand) {
         $env:UV_CACHE_DIR = Join-Path $env:TEMP "uv-cache"
     }
     $uvPath = if ($uvCommand.PSObject.Properties.Name -contains "Source") { $uvCommand.Source } else { $uvCommand.FullName }
+    $script:UvBin = $uvPath
+    $env:M32_INSTALL_UV_BIN = $script:UvBin
     $env:UV_MANAGED_PYTHON = "1"
+    if (-not $DryRun) {
+        $runtimeArgs += "--bootstrap-apply"
+        $runtimeArgs += "--uv-bin"
+        $runtimeArgs += $script:UvBin
+    }
     & $uvPath run --frozen --managed-python --python $ApprovedPythonMinor python @runtimeArgs
+    } finally {
+        if (-not [string]::IsNullOrEmpty($BootstrapSourceRoot)) {
+            $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
+            $resolvedBootstrapRoot = [System.IO.Path]::GetFullPath($BootstrapSourceRoot)
+            if ($resolvedBootstrapRoot.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase) -and
+                (Split-Path -Leaf $resolvedBootstrapRoot) -like "m32-bridge-bootstrap-*") {
+                Remove-Item -LiteralPath $resolvedBootstrapRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
 } else {
     $payload = Get-MissingUvPayload
     if ($Json) {

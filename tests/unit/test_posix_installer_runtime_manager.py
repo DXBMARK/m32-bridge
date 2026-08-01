@@ -144,6 +144,10 @@ def test_posix_github_raw_source_metadata_and_missing_uv_are_not_success(tmp_pat
 
 
 def test_posix_apply_offers_first_run_setup_without_running_it(tmp_path):
+    uv_bin = tmp_path / "runtime" / "uv"
+    uv_bin.parent.mkdir(parents=True)
+    uv_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    uv_bin.chmod(0o755)
     result = script_runtime.build_install_result(
         surface="posix",
         platform="linux",
@@ -153,7 +157,7 @@ def test_posix_apply_offers_first_run_setup_without_running_it(tmp_path):
         uv_state=RuntimeManagerState(uv_status="present"),
     )
 
-    applied = script_runtime.perform_apply_install("posix", result)
+    applied = script_runtime.perform_apply_install("posix", result, uv_bin=str(uv_bin))
 
     assert applied["ok"] is True
     assert applied["first_run_setup"]["offered"] is True

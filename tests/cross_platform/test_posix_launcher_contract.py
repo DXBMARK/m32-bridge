@@ -38,6 +38,11 @@ def test_posix_generated_launcher_is_not_recursive(tmp_path):
     app_path = tmp_path / "home" / "operator" / ".m32-bridge" / "app"
     launcher_path = tmp_path / "home" / "operator" / ".local" / "bin" / "m32-bridge"
 
+    uv_bin = tmp_path / "runtime tools" / "uv's binary"
+    uv_bin.parent.mkdir(parents=True)
+    uv_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    uv_bin.chmod(0o755)
+
     _apply_user_local_install(
         "posix",
         {
@@ -45,6 +50,7 @@ def test_posix_generated_launcher_is_not_recursive(tmp_path):
             "launcher_path": str(launcher_path),
             "install_root": str(app_path.parent),
         },
+        uv_bin=str(uv_bin),
     )
 
     text = launcher_path.read_text(encoding="utf-8")
@@ -53,3 +59,8 @@ def test_posix_generated_launcher_is_not_recursive(tmp_path):
     assert str(app_path) in text
     assert 'cd "$APP_DIR"' in text
     assert "--project" in text
+    assert f"UV_BIN={str(uv_bin)!r}" not in text
+    assert "UV_BIN=" in text
+    assert 'exec "$UV_BIN" run --frozen' in text
+    assert "exec uv run" not in text
+    assert "'\"'\"'" in text

@@ -76,6 +76,9 @@ def test_windows_script_reports_all_idempotency_states_without_silent_success():
 
 def test_windows_apply_materializes_app_without_forbidden_files(tmp_path):
     local_app_data = tmp_path / "LocalAppData"
+    uv_bin = tmp_path / "Runtime Tools" / "uv.exe"
+    uv_bin.parent.mkdir(parents=True)
+    uv_bin.write_bytes(b"fake uv")
     result = build_install_result(
         surface="windows",
         platform="windows_powershell",
@@ -84,7 +87,7 @@ def test_windows_apply_materializes_app_without_forbidden_files(tmp_path):
         uv_state=RuntimeManagerState(uv_status="present"),
     )
 
-    applied = perform_apply_install("windows", result)
+    applied = perform_apply_install("windows", result, uv_bin=str(uv_bin))
     app_path = Path(applied["app_path"])
 
     assert applied["ok"] is True
@@ -98,6 +101,9 @@ def test_windows_apply_materializes_app_without_forbidden_files(tmp_path):
 
 
 def test_windows_materialization_failure_is_not_success(monkeypatch, tmp_path):
+    uv_bin = tmp_path / "Runtime Tools" / "uv.exe"
+    uv_bin.parent.mkdir(parents=True)
+    uv_bin.write_bytes(b"fake uv")
     result = build_install_result(
         surface="windows",
         platform="windows_powershell",
@@ -110,7 +116,7 @@ def test_windows_materialization_failure_is_not_success(monkeypatch, tmp_path):
         raise OSError("copy failed")
 
     monkeypatch.setattr("m32_bridge.installer.script_runtime._materialize_app", fail_materialize)
-    applied = perform_apply_install("windows", result)
+    applied = perform_apply_install("windows", result, uv_bin=str(uv_bin))
 
     assert applied["ok"] is False
     assert applied["status"] in {"partial_failure", "failed"}

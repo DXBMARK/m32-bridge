@@ -89,9 +89,11 @@ Options:
   --platform VALUE   macos, linux, wsl, raspberry_pi_os.
   --target-version VERSION
 
-Installer commands:
-  /status /health /setup /get-info /verify-device /doctor-runtime
-  /contact /clear /exit
+Bootstrap commands:
+  /status /help /contact /clear /exit
+
+After installation:
+  /health /setup /get-info /verify-device /doctor-runtime /mcp-config
 
 Status colours:
   Green available/success/safe; Yellow action; Red blocker; Slate information.
@@ -175,11 +177,22 @@ is_tty() {
 }
 
 ansi_or_plain() {
-  if is_tty; then
-    printf '\033[38;5;208m%s\033[0m\n' "$1"
-  else
-    printf '%s\n' "$1"
+  case "$(terminal_color_mode)" in
+    truecolor) printf '\033[38;2;249;126;26m%s\033[0m\n' "$1" ;;
+    basic) printf '\033[33m%s\033[0m\n' "$1" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+terminal_color_mode() {
+  if ! is_tty || [ "${TERM:-dumb}" = "dumb" ] || [ "${NO_COLOR:-}" != "" ]; then
+    printf '%s\n' none
+    return
   fi
+  case "${COLORTERM:-}" in
+    truecolor|24bit) printf '%s\n' truecolor ;;
+    *) printf '%s\n' basic ;;
+  esac
 }
 
 tty_width() {
@@ -199,6 +212,7 @@ paint_tty_lines() {
   if [ "${width}" -lt 20 ]; then
     width=20
   fi
+  color_mode="$(terminal_color_mode)"
   while IFS= read -r line; do
     visible_len=${#line}
     if [ "${visible_len}" -gt "${width}" ]; then
@@ -206,11 +220,17 @@ paint_tty_lines() {
       visible_len=${#line}
     fi
     pad=$((width - visible_len))
-    printf '\033[48;2;36;57;71m%s' "${line}"
-    if [ "${pad}" -gt 0 ]; then
-      printf '%*s' "${pad}" ''
+    if [ "${color_mode}" = "truecolor" ]; then
+      printf '\033[48;2;36;57;71m%s' "${line}"
+      if [ "${pad}" -gt 0 ]; then
+        printf '%*s' "${pad}" ''
+      fi
+      printf '\033[0m\n'
+    elif [ "${color_mode}" = "basic" ]; then
+      printf '\033[37m%s\033[0m\n' "${line}"
+    else
+      printf '%s\n' "${line}"
     fi
-    printf '\033[48;2;36;57;71m\n'
   done
 }
 
@@ -245,9 +265,10 @@ print_missing_uv_tty() {
   if [ "${DRY_RUN}" = "1" ]; then
     mode="dry-run"
   fi
-  if is_tty; then
-    printf '\033[48;2;36;57;71m\033[2J\033[H\033[38;2;249;126;26m'
-  fi
+  case "$(terminal_color_mode)" in
+    truecolor) printf '\033[2J\033[H\033[38;2;249;126;26m' ;;
+    basic) printf '\033[2J\033[H\033[33m' ;;
+  esac
   {
   cat <<TEXT
 X32-BRIDGE MCP INSTALLER
@@ -269,7 +290,11 @@ Download capability
   wget fallback: $(if command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then printf 'optional, not installed'; elif command -v wget >/dev/null 2>&1; then printf available; else printf 'optional, not installed'; fi)
   Manual fallback: available
   uv status: missing
+  managed Python state: not_installed
+  application installed state: not_installed
+  launcher state: not_installed
   Python strategy: CPython 3.13.x managed by uv; system Python unchanged; no global py required
+  Runtime config: not inspected until application runtime is ready
 
 Source Check
   install_source: ${INSTALL_SOURCE}
@@ -294,6 +319,8 @@ Safety
   no /set
   no OSC writes
   no IDE or MCP client config writes
+  network_scan=not_run
+  console_probe=not_run
 
 Required Actions
   INSTALL_UV_USER_LOCAL: Install uv in user space
@@ -301,7 +328,8 @@ Required Actions
     command: download https://astral.sh/uv/install.sh to a temporary file; run only after exact INSTALL confirmation
     confirmation_required=true
 
-Quick Actions
+After installation
+  These commands become available after the managed application runtime is installed.
   /health          Check runtime and installation readiness
   /setup           Configure a known console endpoint
   /get-info        Read information from the configured endpoint
@@ -349,11 +377,18 @@ SETUP
       ;;
     /status|status)
       printf '%s\n' "installer state: RUNTIME_SETUP_REQUIRED"
+      printf '%s\n' "OS: ${PLATFORM_VALUE}"
+      printf '%s\n' "architecture: $(uname -m 2>/dev/null || printf unknown)"
+      printf '%s\n' "shell: ${SHELL:-unknown}"
       printf '%s\n' "uv: missing"
+      printf '%s\n' "managed Python: not_installed"
+      printf '%s\n' "application: not_installed"
+      printf '%s\n' "launcher: not_installed"
       printf '%s\n' "install source: ${INSTALL_SOURCE}"
       printf '%s\n' "Source configuration: configured: github source archive"
       printf '%s\n' "Reachability: not_checked"
-      printf '%s\n' "safety: osc_writes_sent=0, hardware_verified=false, production_live_ready=false"
+      printf '%s\n' "Runtime config: not inspected until application runtime is ready"
+      printf '%s\n' "safety: admin_required=false, system_python_unchanged=true, network_scan=not_run, console_probe=not_run, osc_writes_sent=0"
       ;;
     /clear|clear)
       printf '\033[2J\033[H'
@@ -446,14 +481,13 @@ CONFIRM
   }
   rm -f "${uv_temp}"
   trap - 0 HUP INT TERM
-  UV_BIN="$(command -v uv 2>/dev/null || true)"
-  if [ -z "${UV_BIN}" ] && [ -x "${HOME}/.local/bin/uv" ]; then
-    UV_BIN="${HOME}/.local/bin/uv"
-  fi
-  if [ -z "${UV_BIN}" ]; then
-    printf '%s\n' "uv was installed but could not be rediscovered. Open a new terminal or add the reported user-local path." >&2
+  UV_BIN="${HOME}/.local/bin/uv"
+  if [ ! -x "${UV_BIN}" ]; then
+    printf '%s\n' "uv installation completed but the expected user-local executable is unavailable: ${UV_BIN}" >&2
     return 1
   fi
+  PATH="${HOME}/.local/bin:${PATH}"
+  export PATH
   "${UV_BIN}" --version
   UV_MANAGED_PYTHON=1 "${UV_BIN}" python install "${APPROVED_PYTHON_MINOR}" || {
     printf '%s\n' "Managed CPython 3.13 installation failed." >&2
@@ -536,6 +570,17 @@ download_remote_source() {
   REPO_ROOT="${extracted}"
 }
 
+cleanup_remote_source() {
+  target="${BOOTSTRAP_SOURCE_ROOT:-}"
+  case "${target}" in
+    "${TMPDIR:-/tmp}"/m32-bridge-bootstrap-*)
+      if [ -d "${target}" ]; then
+        rm -r -- "${target}"
+      fi
+      ;;
+  esac
+}
+
 RUNTIME_MODULE="m32_bridge.installer.script_runtime"
 set -- python -m "${RUNTIME_MODULE}" --surface posix --platform "${PLATFORM_VALUE}" --target-version "${TARGET_VERSION}" --install-source "${INSTALL_SOURCE}" --source-url "${SOURCE_URL}" --source-ref "${SOURCE_REF}"
 if [ "${DRY_RUN}" = "1" ]; then
@@ -561,6 +606,8 @@ fi
 
 if [ -n "${UV_BIN}" ]; then
   if [ "${INSTALL_SOURCE}" != "local_checkout" ]; then
+    BOOTSTRAP_SOURCE_ROOT="${REPO_ROOT}"
+    trap 'cleanup_remote_source' 0 HUP INT TERM
     if ! download_remote_source; then
       exit 1
     fi
@@ -568,6 +615,9 @@ if [ -n "${UV_BIN}" ]; then
   if [ ! -f "${REPO_ROOT}/uv.lock" ]; then
     echo "uv.lock is required for reproducible frozen runtime execution. Refusing unfrozen install." >&2
     exit 1
+  fi
+  if [ "${DRY_RUN}" != "1" ]; then
+    set -- "$@" --bootstrap-apply --uv-bin "${UV_BIN}"
   fi
   PYTHONPATH_VALUE="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
   if [ "${M32_INSTALL_ASSUME_UV:-}" = "installed_user_local" ] && [ -x "${REPO_ROOT}/.venv/bin/python" ]; then
@@ -579,7 +629,7 @@ if [ -n "${UV_BIN}" ]; then
       UV_CACHE_DIR="${DEFAULT_UV_CACHE_DIR}"
       export UV_CACHE_DIR
     fi
-    PYTHONPATH="${PYTHONPATH_VALUE}" UV_MANAGED_PYTHON=1 \
+    PYTHONPATH="${PYTHONPATH_VALUE}" UV_MANAGED_PYTHON=1 M32_INSTALL_UV_BIN="${UV_BIN}" \
       "${UV_BIN}" run --frozen --managed-python --python "${APPROVED_PYTHON_MINOR}" "$@"
   fi
 else

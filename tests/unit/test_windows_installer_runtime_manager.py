@@ -89,6 +89,9 @@ def test_windows_missing_uv_apply_without_confirmation_is_not_success(tmp_path):
 
 
 def test_windows_apply_offers_first_run_setup_without_running_it(tmp_path):
+    uv_bin = tmp_path / "Runtime Tools" / "uv.exe"
+    uv_bin.parent.mkdir(parents=True)
+    uv_bin.write_bytes(b"fake uv")
     result = script_runtime.build_install_result(
         surface="windows",
         platform="windows_powershell",
@@ -98,7 +101,7 @@ def test_windows_apply_offers_first_run_setup_without_running_it(tmp_path):
         uv_state=RuntimeManagerState(uv_status="present"),
     )
 
-    applied = script_runtime.perform_apply_install("windows", result)
+    applied = script_runtime.perform_apply_install("windows", result, uv_bin=str(uv_bin))
 
     assert applied["ok"] is True
     assert applied["first_run_setup"]["offered"] is True

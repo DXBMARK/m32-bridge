@@ -8,8 +8,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
-import yaml
-
 DEFAULT_CONSOLE_PORT = 10023
 VALID_TARGET_TYPES = {"emulator", "hardware", "unknown"}
 
@@ -220,6 +218,7 @@ def save_runtime_config(
     environment: str | None = None,
     config_scope: str = "user",
 ) -> None:
+    yaml = _yaml_module()
     path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, Any] = {
         "schema_version": "1",
@@ -267,11 +266,25 @@ def probe_info(*_args: Any, **_kwargs: Any) -> None:
 
 
 def _load_config_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    yaml = _yaml_module()
     try:
         loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
     except OSError:
         return {}
     return loaded if isinstance(loaded, dict) else {}
+
+
+def _yaml_module() -> Any:
+    try:
+        import yaml
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "PyYAML is required to read or write runtime configuration. "
+            "Complete the managed application installation, then retry."
+        ) from exc
+    return yaml
 
 
 def _config_host(config: Mapping[str, Any]) -> str | None:

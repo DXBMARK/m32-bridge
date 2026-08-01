@@ -39,6 +39,10 @@ def test_windows_generated_launcher_is_not_recursive(tmp_path):
     app_path = tmp_path / "LocalAppData" / "M32Bridge" / "app"
     launcher_path = tmp_path / "LocalAppData" / "M32Bridge" / "bin" / "m32-bridge.cmd"
 
+    uv_bin = tmp_path / "Runtime Tools" / "uv.exe"
+    uv_bin.parent.mkdir(parents=True)
+    uv_bin.write_bytes(b"fake uv")
+
     _apply_user_local_install(
         "windows",
         {
@@ -46,6 +50,7 @@ def test_windows_generated_launcher_is_not_recursive(tmp_path):
             "launcher_path": str(launcher_path),
             "install_root": str(app_path.parent),
         },
+        uv_bin=str(uv_bin),
     )
 
     text = launcher_path.read_text(encoding="utf-8")
@@ -54,3 +59,7 @@ def test_windows_generated_launcher_is_not_recursive(tmp_path):
     assert str(app_path) in text
     assert "/d \"%M32_BRIDGE_APP_DIR%\"" in text
     assert "--project" in text
+    assert f'set "UV_BIN={uv_bin}"' in text
+    assert '"%UV_BIN%" run --frozen' in text
+    assert "\nuv run" not in text.lower()
+    assert "set path=" not in text.lower()

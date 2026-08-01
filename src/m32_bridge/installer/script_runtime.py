@@ -4,7 +4,9 @@ import argparse
 import json
 import os
 import platform as py_platform
+import shlex
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -19,9 +21,6 @@ from .runtime_manager import (
     managed_python_policy,
     platform_information,
 )
-from .tty_app import installer_contact_text, installer_help_text, render_tty_installer, run_tty_app
-
-
 VERSION = "0.1.0"
 IDEMPOTENCY_STATES = (
     "fresh_install",
@@ -46,6 +45,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source-url", default=os.environ.get("M32_INSTALL_SOURCE_URL"))
     parser.add_argument("--source-ref", default=os.environ.get("M32_INSTALL_SOURCE_REF"))
     parser.add_argument("--confirm-dependency-actions", action="store_true")
+    parser.add_argument("--bootstrap-apply", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--uv-bin", default=os.environ.get("M32_INSTALL_UV_BIN"), help=argparse.SUPPRESS)
     parser.add_argument("--tty", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--color", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
@@ -64,80 +65,109 @@ def main(argv: list[str] | None = None) -> int:
         source_url=args.source_url,
         source_ref=args.source_ref,
     )
-
     tty_mode = bool(args.tty or (sys.stdin.isatty() and sys.stdout.isatty() and not args.json_output))
     if not args.dry_run:
         if not result["installer_can_continue"]:
             if args.json_output:
                 print(json.dumps(result, indent=2, sort_keys=True))
             elif tty_mode:
-                run_tty_app(args.surface, result, dry_run=args.dry_run, color=args.color)
+                _print_plain(args.surface, result, dry_run=args.dry_run)
             else:
                 _print_plain(args.surface, result, dry_run=args.dry_run, tty=tty_mode, color=args.color)
             return 1
-        result = perform_apply_install(args.surface, result)
+        result = perform_apply_install(
+            args.surface,
+            result,
+            bootstrap_apply=args.bootstrap_apply,
+            uv_bin=args.uv_bin,
+        )
 
     if args.json_output:
         print(json.dumps(result, indent=2, sort_keys=True))
-    elif tty_mode:
-        run_tty_app(args.surface, result, dry_run=args.dry_run, color=args.color)
+    elif tty_mode and result.get("runtime_info", {}).get("application_runtime_ready"):
+        _run_tty_app(args.surface, result, dry_run=args.dry_run, color=args.color)
     else:
-        _print_plain(args.surface, result, dry_run=args.dry_run, tty=tty_mode, color=args.color)
+        _print_plain(args.surface, result, dry_run=args.dry_run)
     return 0 if result["ok"] else 1
 
 
-def perform_apply_install(surface: str, result: dict[str, Any]) -> dict[str, Any]:
-    from .lifecycle import render_lifecycle_guidance
-    from .mcp_guidance import render_mcp_guidance
-
+def perform_apply_install(
+    surface: str,
+    result: dict[str, Any],
+    *,
+    bootstrap_apply: bool = False,
+    uv_bin: str | None = None,
+) -> dict[str, Any]:
+    bootstrap_apply = bool(bootstrap_apply or result.get("bootstrap_apply"))
+    uv_bin = uv_bin or result.get("uv_bin") or os.environ.get("M32_INSTALL_UV_BIN")
     try:
-        _apply_user_local_install(surface, result)
+        resolved_uv_bin = _resolve_uv_executable(surface, uv_bin)
+        _apply_user_local_install(surface, result, uv_bin=resolved_uv_bin)
+        runtime_readiness = (
+            _synchronize_application_runtime(surface, result, uv_bin=resolved_uv_bin)
+            if bootstrap_apply
+            else {
+                "ready": True,
+                "managed_python_version": result.get("runtime_info", {}).get("managed_python_version") or "3.13.x",
+                "required_imports": "not_run_internal_call",
+            }
+        )
+        if not runtime_readiness.get("ready"):
+            raise InstallStepError(
+                error_code="APPLICATION_RUNTIME_NOT_READY",
+                failed_step="application_runtime_readiness",
+                message=str(runtime_readiness.get("message") or "Required application imports did not pass."),
+                recovery_action="Rerun the installer to repair the user-local application environment.",
+            )
     except OSError as exc:
-        lifecycle_guidance = render_lifecycle_guidance(surface=surface, install_status="partial_failure")
-        return {
-            **result,
-            "ok": False,
-            "status": "partial_failure",
-            "error_code": "APP_MATERIALIZATION_FAILED",
-            "message": f"partial_failure: app materialization failed before install success: {exc}",
-            "installer_can_continue": False,
-            "lifecycle_guidance": lifecycle_guidance,
-            "hardware_verified": False,
-            "production_live_ready": False,
-            "osc_writes_sent": 0,
-        }
+        return _controlled_install_failure(
+            surface,
+            result,
+            error_code="APP_MATERIALIZATION_FAILED",
+            failed_step="application_install",
+            message=f"Application files could not be installed: {exc}",
+            recovery_action="Rerun the installer to repair the user-local application files.",
+            partial=True,
+        )
     except ValueError as exc:
-        lifecycle_guidance = render_lifecycle_guidance(surface=surface, install_status="failed")
-        return {
-            **result,
-            "ok": False,
-            "status": "failed",
-            "error_code": "INSTALL_BOUNDARY_REJECTED",
-            "message": str(exc),
-            "installer_can_continue": False,
-            "lifecycle_guidance": lifecycle_guidance,
-            "hardware_verified": False,
-            "production_live_ready": False,
-            "osc_writes_sent": 0,
-        }
+        return _controlled_install_failure(
+            surface,
+            result,
+            error_code="INSTALL_BOUNDARY_REJECTED",
+            failed_step="install_boundary",
+            message=str(exc),
+            recovery_action="Review the user-local target paths and rerun the installer.",
+        )
+    except InstallStepError as exc:
+        return _controlled_install_failure(
+            surface,
+            result,
+            error_code=exc.error_code,
+            failed_step=exc.failed_step,
+            message=exc.message,
+            recovery_action=exc.recovery_action,
+            partial=True,
+        )
 
     status = "already_current" if result["status"] in {"fresh_install", "repair", "update"} else result["status"]
-    launcher_path = Path(str(result.get("launcher_path", "")))
-    launcher_root = launcher_path.parents[2] if len(launcher_path.parents) >= 3 else None
-    mcp_guidance = render_mcp_guidance(
-        os_family="windows" if surface == "windows" else None,
-        home=None if surface == "windows" else launcher_root,
-        local_app_data=launcher_root if surface == "windows" else None,
-    )
-    lifecycle_guidance = render_lifecycle_guidance(
-        surface=surface,
-        install_status=status,
-    )
+    mcp_guidance, lifecycle_guidance = _post_install_guidance(surface, result, status=status)
+    public_result = _without_private_fields(result)
+    runtime_info = {
+        **dict(public_result.get("runtime_info") or {}),
+        "application_runtime_ready": True,
+        "full_tty_allowed": True,
+        "managed_python_version": runtime_readiness.get("managed_python_version", "3.13.x"),
+        "required_imports": runtime_readiness.get("required_imports", "ok"),
+        "admin_used": False,
+        "network_scan": "not_run",
+        "console_probe": "not_run",
+    }
     return {
-        **result,
+        **public_result,
         "ok": True,
         "status": status,
         "path_updated": False,
+        "runtime_info": runtime_info,
         "first_run_setup": {
             "offered": True,
             "interactive": False,
@@ -166,6 +196,196 @@ def perform_apply_install(surface: str, result: dict[str, Any]) -> dict[str, Any
         "production_live_ready": False,
         "osc_writes_sent": 0,
     }
+
+
+class InstallStepError(RuntimeError):
+    def __init__(self, *, error_code: str, failed_step: str, message: str, recovery_action: str) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.failed_step = failed_step
+        self.message = message
+        self.recovery_action = recovery_action
+
+
+def _resolve_uv_executable(surface: str, uv_bin: str | None) -> str:
+    if not uv_bin:
+        raise InstallStepError(
+            error_code="UV_EXECUTABLE_UNAVAILABLE",
+            failed_step="uv_reuse",
+            message="The absolute uv executable path is required before launcher creation.",
+            recovery_action="Rerun the installer so it can pass the detected user-local uv path to the launcher.",
+        )
+    candidate = Path(uv_bin).expanduser()
+    if not candidate.is_absolute() or not candidate.is_file():
+        raise InstallStepError(
+            error_code="UV_EXECUTABLE_UNAVAILABLE",
+            failed_step="uv_reuse",
+            message=f"The uv executable path is unavailable or not absolute: {uv_bin}",
+            recovery_action="Rerun the installer so it can verify the user-local uv executable before launcher creation.",
+        )
+    if surface != "windows" and not os.access(candidate, os.X_OK):
+        raise InstallStepError(
+            error_code="UV_EXECUTABLE_UNAVAILABLE",
+            failed_step="uv_reuse",
+            message=f"The uv executable is not executable: {candidate}",
+            recovery_action="Restore execute permission on the user-local uv binary, then rerun the installer.",
+        )
+    return str(candidate.resolve())
+
+
+def _controlled_install_failure(
+    surface: str,
+    result: dict[str, Any],
+    *,
+    error_code: str,
+    failed_step: str,
+    message: str,
+    recovery_action: str,
+    partial: bool = False,
+) -> dict[str, Any]:
+    from .lifecycle import render_lifecycle_guidance
+
+    status = "partial_failure" if partial else "failed"
+    public_result = _without_private_fields(result)
+    runtime_info = {
+        **dict(public_result.get("runtime_info") or {}),
+        "application_runtime_ready": False,
+        "full_tty_allowed": False,
+        "failed_step": failed_step,
+        "recovery_action": recovery_action,
+        "admin_used": False,
+        "network_scan": "not_run",
+        "console_probe": "not_run",
+    }
+    return {
+        **public_result,
+        "ok": False,
+        "status": status,
+        "error_code": error_code,
+        "message": message,
+        "installer_can_continue": False,
+        "runtime_info": runtime_info,
+        "system_python_modified": False,
+        "lifecycle_guidance": render_lifecycle_guidance(surface=surface, install_status=status),
+        "hardware_verified": False,
+        "production_live_ready": False,
+        "osc_writes_sent": 0,
+    }
+
+
+def _synchronize_application_runtime(surface: str, result: dict[str, Any], *, uv_bin: str | None = None) -> dict[str, Any]:
+    uv_bin = Path(str(uv_bin or os.environ.get("M32_INSTALL_UV_BIN") or ""))
+    if not str(uv_bin) or not uv_bin.is_file() or not os.access(uv_bin, os.X_OK):
+        raise InstallStepError(
+            error_code="UV_EXECUTABLE_UNAVAILABLE",
+            failed_step="uv_reuse",
+            message="The user-local uv executable could not be used by the current installer process.",
+            recovery_action="Rerun the installer; no shell restart or PATH export should be required.",
+        )
+    app_path = Path(result["app_path"])
+    base = [str(uv_bin), "--directory", str(app_path)]
+    env = dict(os.environ)
+    env["UV_MANAGED_PYTHON"] = "1"
+    sync = _run_install_command(
+        [*base, "sync", "--frozen", "--managed-python", "--python", APPROVED_PYTHON_MINOR],
+        env=env,
+        error_code="APP_SYNC_FAILED",
+        failed_step="application_sync",
+        recovery_action="Rerun the installer to repair the frozen application environment.",
+    )
+    del sync
+    smoke_code = "import yaml, mcp, pydantic, m32_bridge; print('READY')"
+    smoke = _run_install_command(
+        [*base, "run", "--frozen", "--managed-python", "--python", APPROVED_PYTHON_MINOR, "python", "-c", smoke_code],
+        env=env,
+        error_code="REQUIRED_IMPORT_SMOKE_FAILED",
+        failed_step="required_import_smoke",
+        recovery_action="Rerun the installer to restore application dependencies.",
+    )
+    version = _run_install_command(
+        [*base, "run", "--frozen", "--managed-python", "--python", APPROVED_PYTHON_MINOR, "python", "-c", "import platform; print(platform.python_version())"],
+        env=env,
+        error_code="MANAGED_PYTHON_CHECK_FAILED",
+        failed_step="managed_python_check",
+        recovery_action="Rerun the installer to repair managed CPython 3.13.",
+    )
+    launcher = Path(result["launcher_path"])
+    ready = app_path.is_dir() and (app_path / ".venv").is_dir() and launcher.is_file() and smoke.stdout.strip() == "READY"
+    return {
+        "ready": ready,
+        "managed_python_version": version.stdout.strip(),
+        "required_imports": "ok" if smoke.stdout.strip() == "READY" else "failed",
+    }
+
+
+def _without_private_fields(result: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in result.items() if key not in {"bootstrap_apply", "uv_bin"}}
+
+
+def _run_install_command(
+    argv: list[str],
+    *,
+    env: dict[str, str],
+    error_code: str,
+    failed_step: str,
+    recovery_action: str,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        completed = subprocess.run(argv, check=False, capture_output=True, text=True, env=env)
+    except OSError as exc:
+        raise InstallStepError(
+            error_code=error_code,
+            failed_step=failed_step,
+            message=f"{failed_step} could not start: {exc}",
+            recovery_action=recovery_action,
+        ) from None
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "command failed").strip().splitlines()[-1]
+        raise InstallStepError(
+            error_code=error_code,
+            failed_step=failed_step,
+            message=f"{failed_step} failed: {detail}",
+            recovery_action=recovery_action,
+        )
+    return completed
+
+
+def _post_install_guidance(surface: str, result: dict[str, Any], *, status: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    from .lifecycle import render_lifecycle_guidance
+    from .mcp_guidance import render_mcp_guidance
+
+    launcher_path = Path(str(result.get("launcher_path", "")))
+    launcher_root = launcher_path.parents[2] if len(launcher_path.parents) >= 3 else None
+    mcp_guidance = render_mcp_guidance(
+        os_family="windows" if surface == "windows" else None,
+        home=None if surface == "windows" else launcher_root,
+        local_app_data=launcher_root if surface == "windows" else None,
+    )
+    return mcp_guidance, render_lifecycle_guidance(surface=surface, install_status=status)
+
+
+def _run_tty_app(surface: str, result: dict[str, Any], *, dry_run: bool, color: bool) -> None:
+    from .tty_app import run_tty_app
+
+    run_tty_app(surface, result, dry_run=dry_run, color=color)
+
+
+def installer_contact_text(*args: Any, **kwargs: Any) -> str:
+    from .tty_app import installer_contact_text as render
+
+    return render(*args, **kwargs)
+
+
+def installer_help_text(*args: Any, **kwargs: Any) -> str:
+    from .tty_app import installer_help_text as render
+
+    return render(*args, **kwargs)
+
+
+def render_tty_installer(*args: Any, **kwargs: Any) -> str:
+    from .tty_app import render_tty_installer as render
+
+    return render(*args, **kwargs)
 
 
 def build_install_result(
@@ -316,34 +536,45 @@ def _partial_failure_marker(surface: str, *, home: Path | str | None = None, loc
     return (home_path / ".m32-bridge" / ".partial_failure").exists()
 
 
-def _apply_user_local_install(surface: str, result: dict[str, Any]) -> None:
+def _apply_user_local_install(surface: str, result: dict[str, Any], *, uv_bin: str) -> None:
     _assert_user_local_result(surface, result)
+    resolved_uv_bin = _resolve_uv_executable(surface, uv_bin)
     app_path = Path(result["app_path"])
     launcher_path = Path(result["launcher_path"])
     _materialize_app(app_path)
     launcher_path.parent.mkdir(parents=True, exist_ok=True)
     if surface == "windows":
+        app_value = _cmd_assignment_value(str(app_path))
+        uv_value = _cmd_assignment_value(resolved_uv_bin)
         launcher_path.write_text(
             "@echo off\r\n"
-            f"set \"M32_BRIDGE_APP_DIR={app_path}\"\r\n"
-            f"set \"PYTHONPATH={app_path}\\src;%PYTHONPATH%\"\r\n"
+            f"set \"M32_BRIDGE_APP_DIR={app_value}\"\r\n"
+            f"set \"UV_BIN={uv_value}\"\r\n"
+            "set \"PYTHONPATH=%M32_BRIDGE_APP_DIR%\\src;%PYTHONPATH%\"\r\n"
             "set \"UV_MANAGED_PYTHON=1\"\r\n"
             "cd /d \"%M32_BRIDGE_APP_DIR%\"\r\n"
-            "uv run --frozen --managed-python --python 3.13 --project \"%M32_BRIDGE_APP_DIR%\" python -m m32_bridge.__main__ %*\r\n",
+            "\"%UV_BIN%\" run --frozen --managed-python --python 3.13 --project \"%M32_BRIDGE_APP_DIR%\" python -m m32_bridge.__main__ %*\r\n",
             encoding="utf-8",
         )
     else:
         launcher_path.write_text(
             "#!/bin/sh\n"
-            f"APP_DIR='{app_path}'\n"
+            f"APP_DIR={shlex.quote(str(app_path))}\n"
+            f"UV_BIN={shlex.quote(resolved_uv_bin)}\n"
             "cd \"$APP_DIR\"\n"
             "PYTHONPATH=\"$APP_DIR/src${PYTHONPATH:+:$PYTHONPATH}\"\n"
             "UV_MANAGED_PYTHON=1\n"
             "export M32_BRIDGE_APP_DIR=\"$APP_DIR\" PYTHONPATH UV_MANAGED_PYTHON\n"
-            "exec uv run --frozen --managed-python --python 3.13 --project \"$APP_DIR\" python -m m32_bridge.__main__ \"$@\"\n",
+            "exec \"$UV_BIN\" run --frozen --managed-python --python 3.13 --project \"$APP_DIR\" python -m m32_bridge.__main__ \"$@\"\n",
             encoding="utf-8",
         )
         launcher_path.chmod(0o755)
+
+
+def _cmd_assignment_value(value: str) -> str:
+    if any(character in value for character in ('"', "\r", "\n")):
+        raise ValueError("Windows launcher path contains an unsupported character")
+    return value.replace("%", "%%")
 
 
 def _materialize_app(app_path: Path, *, source_root: Path | None = None) -> None:
@@ -498,6 +729,8 @@ def _recommendations(surface: str, result: dict[str, Any]) -> list[str]:
 
 def _print_plain(surface: str, result: dict[str, Any], *, dry_run: bool, tty: bool = False, color: bool = False) -> None:
     if tty:
+        from .tty_app import render_tty_installer
+
         print(render_tty_installer(surface, result, dry_run=dry_run, color=color))
         return
     print("M32 Bridge installer status")

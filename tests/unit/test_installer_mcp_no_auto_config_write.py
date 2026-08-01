@@ -29,6 +29,10 @@ def test_installer_apply_success_includes_manual_copy_mcp_guidance(monkeypatch, 
     (source / "uv.lock").write_text("", encoding="utf-8")
     (source / "src" / "m32_bridge" / "__init__.py").write_text("", encoding="utf-8")
     monkeypatch.setattr(script_runtime, "_repo_root", lambda: source)
+    uv_bin = tmp_path / "runtime" / "uv"
+    uv_bin.parent.mkdir(parents=True)
+    uv_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    uv_bin.chmod(0o755)
 
     plan = script_runtime.build_install_result(
         surface="posix",
@@ -37,7 +41,7 @@ def test_installer_apply_success_includes_manual_copy_mcp_guidance(monkeypatch, 
         home=tmp_path / "home",
         uv_state=RuntimeManagerState(uv_status="present"),
     )
-    result = script_runtime.perform_apply_install("posix", plan)
+    result = script_runtime.perform_apply_install("posix", plan, uv_bin=str(uv_bin))
 
     assert result["ok"] is True
     assert result["mcp_guidance"]["manual_copy_only"] is True
