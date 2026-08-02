@@ -530,25 +530,90 @@ def doctor_runtime_command(
     timeout: float,
     environ: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    from m32_bridge.installer.runtime_manager import local_runtime_diagnostics
+    from m32_bridge.installer.runtime_manager import (
+        local_runtime_diagnostics,
+    )
 
     payload = local_runtime_diagnostics(environ=environ)
+
+    normalized_host = (
+        str(host).strip()
+        if host is not None and str(host).strip()
+        else None
+    )
+    normalized_port = (
+        port
+        if port is not None
+        else (10023 if normalized_host else None)
+    )
+
     payload.update(
         {
             "control": "doctor-runtime",
-            "configured_host": host,
-            "configured_port": port,
+            "configured_host": normalized_host,
+            "configured_port": normalized_port,
             "requested_timeout": timeout,
             "attempted_path": None,
             "console_probe": "not_run",
             "connection_lifecycle": "not_checked",
             "structured": True,
+            "network_scan": "not_run",
+            "scan_attempted": False,
             "osc_writes_sent": 0,
             "hardware_verified": False,
             "production_live_ready": False,
         }
     )
-    payload["os_recommendations"] = _current_os_recommendations()
+    payload["os_recommendations"] = (
+        _current_os_recommendations()
+    )
+
+    if normalized_host is None:
+        return payload
+
+    probe = setup_info_probe(
+        normalized_host,
+        normalized_port,
+        timeout=timeout,
+    )
+
+    probe_status = str(
+        probe.get("udp_info_probe_result")
+        or "NOT_CONNECTED"
+    )
+    connected = probe_status == "CONNECTED"
+
+    payload.update(
+        {
+            "configured_host": normalized_host,
+            "configured_port": normalized_port,
+            "attempted_path": (
+                probe.get("attempted_path")
+                or "/info"
+            ),
+            "console_probe": "checked",
+            "connection_lifecycle": (
+                "connected"
+                if connected
+                else "not_connected"
+            ),
+            "udp_info_probe_result": probe_status,
+            "response_address": probe.get(
+                "response_address"
+            ),
+            "latency_ms": probe.get("latency_ms"),
+            "exception_type": probe.get(
+                "exception_type"
+            ),
+            "connected": connected,
+            "network_scan": "not_run",
+            "scan_attempted": False,
+            "osc_writes_sent": 0,
+            "hardware_verified": False,
+            "production_live_ready": False,
+        }
+    )
+
     return payload
 
 
