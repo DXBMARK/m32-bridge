@@ -136,7 +136,8 @@ def test_release_workflow_is_generic_and_quality_gated():
     assert "if: github.event_name == 'push'" in text
     assert "uv lock --check" in text
     assert "python -m compileall src tests scripts" in text
-    assert "pytest tests/unit tests/cross_platform" in text
+    assert "--extra test python -m pytest tests/unit tests/cross_platform" in text
+    assert "uv run --frozen --python 3.13 pytest" not in text
     assert 'ref: ${{ github.sha }}' in text
     assert "tag {actual} does not match {expected}" in text
     assert "git archive" in text

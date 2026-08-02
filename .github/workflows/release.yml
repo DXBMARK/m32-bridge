@@ -37,7 +37,7 @@ jobs:
         run: UV_MANAGED_PYTHON=1 uv run --frozen --python 3.13 python -m compileall src tests scripts
 
       - name: Run unit and cross-platform quality gate
-        run: UV_MANAGED_PYTHON=1 uv run --frozen --python 3.13 pytest tests/unit tests/cross_platform -q -p no:cacheprovider
+        run: UV_MANAGED_PYTHON=1 uv run --frozen --python 3.13 --extra test python -m pytest tests/unit tests/cross_platform -q -p no:cacheprovider
 
       - name: Validate version tag
         if: github.event_name == 'push'
