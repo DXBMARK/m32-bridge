@@ -48,16 +48,47 @@ def test_connectivity_checks_return_mocked_online_offline_and_timeout():
     assert check_github_install_source(checker=timeout_checker) == "TIMEOUT"
 
 
-def test_windows_non_tty_missing_uv_uses_powershell_irm_action(monkeypatch, tmp_path):
-    monkeypatch.setattr("m32_bridge.installer.first_run.detect_uv_status", lambda: type("State", (), {"uv_status": "manual_action_required"})())
-    result = non_tty_setup_response(environ={"PSModulePath": "Modules", "LOCALAPPDATA": str(tmp_path)}, home=tmp_path)
+def test_windows_non_tty_missing_uv_uses_powershell_irm_action(
+    monkeypatch,
+    tmp_path,
+):
+    from m32_bridge.installer import first_run
+
+    monkeypatch.setattr(
+        first_run.sys,
+        "platform",
+        "win32",
+    )
+    monkeypatch.setattr(
+        first_run.platform,
+        "machine",
+        lambda: "AMD64",
+    )
+    monkeypatch.setattr(
+        first_run,
+        "detect_uv_status",
+        lambda: type(
+            "State",
+            (),
+            {"uv_status": "manual_action_required"},
+        )(),
+    )
+
+    result = non_tty_setup_response(
+        environ={
+            "PSModulePath": "Modules",
+            "LOCALAPPDATA": str(tmp_path),
+        },
+        home=tmp_path,
+    )
 
     action = result["required_actions"][0]
+
     assert result["environment"]["surface"] == "windows"
+    assert result["environment"]["detected_shell"] == "powershell"
     assert "irm" in action["command_preview"].lower()
     assert "powershell" in action["download_guidance"].lower()
     assert "curl" not in action["command_preview"].lower()
-
 
 def test_posix_non_tty_missing_uv_uses_curl_wget_manual_guidance(monkeypatch, tmp_path):
     monkeypatch.setattr("m32_bridge.installer.first_run.detect_uv_status", lambda: type("State", (), {"uv_status": "manual_action_required"})())
@@ -68,3 +99,59 @@ def test_posix_non_tty_missing_uv_uses_curl_wget_manual_guidance(monkeypatch, tm
     assert "curl" in action["command_preview"].lower()
     assert "wget" in action["download_guidance"].lower()
     assert "manual" in action["download_guidance"].lower()
+
+
+def test_first_run_uses_kernel_platform_instead_of_powershell_environment(
+    tmp_path,
+    monkeypatch,
+):
+    from m32_bridge.installer import first_run
+    from m32_bridge.installer.runtime_manager import (
+        RuntimeManagerState,
+    )
+
+    monkeypatch.setattr(
+        first_run.sys,
+        "platform",
+        "linux",
+    )
+    monkeypatch.setattr(
+        first_run.platform,
+        "machine",
+        lambda: "x86_64",
+    )
+    monkeypatch.setattr(
+        first_run,
+        "detect_uv_status",
+        lambda: RuntimeManagerState(
+            uv_status="present"
+        ),
+    )
+
+    summary = first_run.environment_summary(
+        home=tmp_path,
+        environ={
+            "HOME": str(tmp_path),
+            "SHELL": "/bin/bash",
+            "PSModulePath": (
+                "/opt/microsoft/powershell/Modules"
+            ),
+            "LOCALAPPDATA": str(
+                tmp_path / "AppData" / "Local"
+            ),
+        },
+        internet_checker=lambda *_args: False,
+        github_checker=lambda *_args: False,
+    )
+
+    assert summary["os"].startswith("linux")
+    assert summary["surface"] == "posix"
+    assert summary["detected_shell"] == "bash"
+    assert summary["app_path"] == str(
+        tmp_path / ".m32-bridge" / "app"
+    )
+    assert summary["launcher_path"] == str(
+        tmp_path / ".local" / "bin" / "m32-bridge"
+    )
+    assert "AppData" not in summary["app_path"]
+    assert not summary["launcher_path"].endswith(".cmd")

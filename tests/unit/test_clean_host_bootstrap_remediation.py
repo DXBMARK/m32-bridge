@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import errno
 import json
 import os
 from pathlib import Path
@@ -388,12 +389,20 @@ def test_posix_clean_host_reuses_new_uv_in_same_tty_process(tmp_path):
     os.close(slave_fd)
     output = bytearray()
 
+    def read_pty_chunk() -> bytes:
+        try:
+            return os.read(master_fd, 65536)
+        except OSError as exc:
+            if exc.errno == errno.EIO:
+                return b""
+            raise
+
     def read_until(marker: bytes, timeout: float = 10.0) -> None:
         deadline = time.monotonic() + timeout
         while marker not in output and time.monotonic() < deadline:
             readable, _, _ = select.select([master_fd], [], [], 0.2)
             if readable:
-                chunk = os.read(master_fd, 65536)
+                chunk = read_pty_chunk()
                 if not chunk:
                     break
                 output.extend(chunk)
@@ -408,7 +417,7 @@ def test_posix_clean_host_reuses_new_uv_in_same_tty_process(tmp_path):
         while process.poll() is None and time.monotonic() < deadline:
             readable, _, _ = select.select([master_fd], [], [], 0.2)
             if readable:
-                chunk = os.read(master_fd, 65536)
+                chunk = read_pty_chunk()
                 if not chunk:
                     break
                 output.extend(chunk)
@@ -418,7 +427,7 @@ def test_posix_clean_host_reuses_new_uv_in_same_tty_process(tmp_path):
             if not readable:
                 break
             try:
-                chunk = os.read(master_fd, 65536)
+                chunk = read_pty_chunk()
                 if not chunk:
                     break
                 output.extend(chunk)

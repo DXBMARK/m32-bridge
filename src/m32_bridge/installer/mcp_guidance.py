@@ -462,7 +462,9 @@ def _wrap_lines(lines: list[str], width: int) -> list[str]:
 
 
 def _os_family(env: Mapping[str, str]) -> str:
-    if env.get("LOCALAPPDATA") or env.get("PSModulePath") or sys.platform.startswith("win"):
+    if env.get("WSL_DISTRO_NAME"):
+        return "wsl"
+    if sys.platform.startswith("win"):
         return "windows"
     if sys.platform == "darwin":
         return "macos"

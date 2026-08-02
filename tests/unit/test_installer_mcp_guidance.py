@@ -218,3 +218,40 @@ def test_mcp_config_chatgpt_plain_has_no_local_json_profile(tmp_path, monkeypatc
     assert "remote MCP required" in output
     assert "Generated snippet" not in output
     assert "{" not in output and "}" not in output
+
+
+def test_mcp_guidance_uses_kernel_platform_instead_of_powershell_environment(
+    tmp_path,
+    monkeypatch,
+):
+    from m32_bridge.installer import mcp_guidance
+
+    monkeypatch.setattr(
+        mcp_guidance.sys,
+        "platform",
+        "linux",
+    )
+
+    guidance = mcp_guidance.render_mcp_guidance(
+        home=tmp_path,
+        environ={
+            "HOME": str(tmp_path),
+            "SHELL": "/bin/bash",
+            "PSModulePath": "/opt/microsoft/powershell/Modules",
+            "LOCALAPPDATA": str(
+                tmp_path / "AppData" / "Local"
+            ),
+        },
+        version="1.2.3",
+    )
+
+    expected = (
+        tmp_path
+        / ".local"
+        / "bin"
+        / "m32-bridge"
+    )
+
+    assert guidance["launcher_path"] == str(expected)
+    assert guidance["command"] == str(expected)
+    assert not guidance["command"].endswith(".cmd")

@@ -250,7 +250,9 @@ def _detected_shell(env: dict[str, str]) -> str:
     shell = Path(env.get("SHELL", "")).name
     if shell in {"zsh", "bash", "fish"}:
         return shell
-    if env.get("PSModulePath"):
+    if shell in {"pwsh", "powershell"}:
+        return "powershell"
+    if sys.platform.startswith("win"):
         return "powershell"
     return "unknown"
 
@@ -258,12 +260,10 @@ def _detected_shell(env: dict[str, str]) -> str:
 def _os_family(env: dict[str, str]) -> str:
     if env.get("WSL_DISTRO_NAME"):
         return "wsl"
-    if env.get("LOCALAPPDATA") or env.get("PSModulePath"):
+    if sys.platform.startswith("win"):
         return "windows"
     if sys.platform == "darwin":
         return "macos"
-    if sys.platform.startswith("win"):
-        return "windows"
     return "linux"
 
 

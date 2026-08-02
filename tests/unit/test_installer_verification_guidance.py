@@ -59,3 +59,67 @@ def test_verify_install_cli_is_no_write_and_no_console_by_default(tmp_path):
     assert result["osc_writes_sent"] == 0
     assert result["hardware_verified"] is False
     assert result["production_live_ready"] is False
+
+
+def test_verification_uses_kernel_platform_instead_of_powershell_environment(
+    tmp_path,
+    monkeypatch,
+):
+    from m32_bridge.installer import verification
+    from m32_bridge.installer.runtime_manager import (
+        RuntimeManagerState,
+    )
+
+    monkeypatch.setattr(
+        verification.sys,
+        "platform",
+        "linux",
+    )
+    monkeypatch.setattr(
+        verification.platform,
+        "machine",
+        lambda: "x86_64",
+    )
+    monkeypatch.setattr(
+        verification,
+        "application_version",
+        lambda *_args, **_kwargs: "1.2.3",
+    )
+    monkeypatch.setattr(
+        verification,
+        "detect_uv_status",
+        lambda: RuntimeManagerState(
+            uv_status="present"
+        ),
+    )
+    monkeypatch.setattr(
+        verification,
+        "inspect_runtime",
+        lambda **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        verification,
+        "detect_ide_clients",
+        lambda **_kwargs: [],
+    )
+
+    result = verification.render_post_install_verification(
+        home=tmp_path,
+        environ={
+            "HOME": str(tmp_path),
+            "SHELL": "/bin/bash",
+            "PSModulePath": "/opt/microsoft/powershell/Modules",
+            "LOCALAPPDATA": str(
+                tmp_path / "AppData" / "Local"
+            ),
+        },
+    )
+
+    assert result["os_family"] == "linux"
+    assert result["detected_shell"] == "bash"
+    assert result["install_path"] == str(
+        tmp_path / ".m32-bridge" / "app"
+    )
+    assert result["launcher_path"] == str(
+        tmp_path / ".local" / "bin" / "m32-bridge"
+    )
