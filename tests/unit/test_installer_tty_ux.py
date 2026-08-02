@@ -9,6 +9,7 @@ import yaml
 
 import m32_bridge.cli as cli_module
 from m32_bridge.config.runtime import default_user_config_path, resolve_runtime_config
+from m32_bridge.installer.application_version import read_project_version
 from m32_bridge.installer.runtime_manager import RuntimeManagerState
 from m32_bridge.installer.script_runtime import (
     build_install_result,
@@ -318,12 +319,20 @@ def test_tty_missing_uv_shows_required_action(tmp_path):
 
 
 def test_installer_help_and_contact_text():
-    assert "/help" in installer_help_text()
-    assert "/contact" in installer_help_text()
-    assert "/status" in installer_help_text()
-    assert "JSON mode" in installer_help_text()
-    assert "FIELD GUIDE" in installer_help_text()
-    assert "q / quit / exit /exit" in installer_help_text()
+    help_text = installer_help_text()
+    assert "/help" in help_text
+    assert "/contact" in help_text
+    assert "/status" in help_text
+    assert "JSON mode" in help_text
+    assert "FIELD GUIDE" in help_text
+    assert "q / quit / exit /exit" in help_text
+    assert "INSTALL SELECTION" in help_text
+    assert "latest stable official Release" in help_text
+    assert "--version <vX.Y.Z>" in help_text
+    assert "--channel <stable|prerelease|main>" in help_text
+    assert "--ref <FULL_40_HEX_SHA>" in help_text
+    assert "--local" in help_text
+    assert "--target-version" not in help_text
     contact = installer_contact_text()
     assert "X32-BRIDGE MCP" in contact
     assert "Version" in contact
@@ -602,7 +611,7 @@ def test_semantic_action_panels_do_not_render_raw_json():
         render_doctor_runtime_panel({"uv_detected": True, "managed_python_detected": True, "python_version": "3.13.12", "healthy": True}),
         render_get_info_panel({"connected": False, "status": "timeout", "attempted_path": "/info"}),
         render_verify_device_panel({"connected": False, "classification": "unknown", "hardware_verified": False}),
-        render_setup_result_panel({"status": "CANCELLED", "attempted_path": None, "intended_path": "/info", "probe_not_run": True, "config_not_written": True}),
+        render_setup_result_panel({"status": "CANCELLED", "attempted_path": "not_attempted", "verification_attempted": False, "config_not_written": True}),
     ]
 
     for panel in panels:
@@ -617,7 +626,7 @@ def test_semantic_action_panels_do_not_render_raw_json():
     assert "CONSOLE INFORMATION" in panels[2]
     assert "DEVICE VERIFICATION" in panels[3]
     assert "SETUP RESULT" in panels[4]
-    assert "Probe not run" in panels[4]
+    assert "Read-only verification attempted" in panels[4]
 
 
 def test_semantic_panels_and_status_have_ansi_when_colored(tmp_path):
@@ -995,10 +1004,9 @@ def test_setup_empty_or_wrong_confirmation_does_not_probe_or_write(tmp_path, mon
             target_type="hardware",
             confirmation=confirmation,
         )
-        assert "Probe not run" in panel
+        assert "Read-only verification attempted" in panel and "false" in panel
         assert "Config not written" in panel and "true" in panel
         assert "Attempted path" in panel and "not_attempted" in panel
-        assert "Intended path" in panel and "/info" in panel
         assert "OSC writes" in panel and "0" in panel
         assert "Network scan" in panel and "not run" in panel
         assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == original
@@ -1051,7 +1059,7 @@ def test_setup_save_offline_endpoint_persists_and_reopen_loads_new_values(tmp_pa
     assert "Saved" in panel and "true" in panel
     assert "Persistence verified" in panel and "true" in panel
     assert "CONNECTION VERIFICATION" in panel
-    assert "Connected" in panel and "false" in panel
+    assert "Connection state" in panel and "unreachable" in panel
     assert "Endpoint verified" in panel and "false" in panel
     assert "Config not written" not in panel
     assert "Configuration was saved successfully." in panel
@@ -1138,7 +1146,7 @@ def test_setup_cancel_preserves_old_config_and_skips_probe(tmp_path, monkeypatch
             confirmation=confirmation,
         )
         assert "Setup cancelled. Existing configuration was not changed." in panel
-        assert "Probe not run" in panel
+        assert "Read-only verification attempted" in panel and "false" in panel
         assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == original
 
 
@@ -1238,7 +1246,7 @@ def test_verify_device_uses_intended_target_but_does_not_verify_hardware(tmp_pat
     assert "Hardware verified" in output and "false" in output
     assert "Production ready" in output and "false" in output
     assert "Intended target describes operator expectation only." in output
-    assert "Network scan" in output and "not run" in output
+    assert "Network scan" in output and "not_run" in output
 
 
 def test_panel_scroll_preserves_last_content_line_and_reports_end_state(tmp_path):
@@ -1505,7 +1513,7 @@ def _semantic_lines(text: str) -> list[str]:
 
 
 def test_help_color_ansi_integrity_across_widths():
-    required_sections = ["INSTALLER HELP", "USAGE", "OPTIONS", "COMMANDS", "NAVIGATION", "CONFIGURATION", "SAFETY", "FIELD GUIDE", "CONTACT"]
+    required_sections = ["INSTALLER HELP", "USAGE", "OPTIONS", "INSTALL SELECTION", "COMMANDS", "NAVIGATION", "CONFIGURATION", "SAFETY", "FIELD GUIDE", "CONTACT"]
     required_commands = ["/help", "/health", "/setup", "/get-info", "/verify-device", "/doctor-runtime", "/mcp-config", "/status", "/contact", "/clear", "/exit"]
     for width in (120, 100, 80, 60, 50):
         coloured = installer_help_text(color=True, width=width)
@@ -1528,10 +1536,12 @@ def test_product_identity_banner_version_and_contact_are_responsive():
     result = build_install_result(surface="posix", platform="linux", dry_run=True)
     rendered = render_tty_installer("posix", result, dry_run=True)
 
+    expected_version = read_project_version(ROOT / "pyproject.toml")
+
     assert BANNER in rendered
     assert POWERED_BY in rendered
     assert "DXBMARK M32 BRIDGE INSTALLER" not in rendered
-    assert application_version() == "0.1.0"
+    assert application_version() == expected_version
     assert COMMAND_REGISTRY["/contact"]["desc"] == "Show product information, version, publisher and support"
 
     for width in (120, 80, 50):
@@ -1540,7 +1550,7 @@ def test_product_identity_banner_version_and_contact_are_responsive():
         assert_ansi_integrity(contact)
         assert "X32-BRIDGE MCP" in plain
         assert "PRODUCT" in plain
-        assert "Version" in plain and "0.1.0" in plain
+        assert "Version" in plain and expected_version in plain
         assert PACKAGE_NAME in plain
         assert CLI_NAME in plain
         assert "PURPOSE" in plain

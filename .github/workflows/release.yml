@@ -1,0 +1,102 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false
+
+      - name: Verify exact commit and clean source
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+
+      - name: Verify lockfile
+        run: UV_MANAGED_PYTHON=1 uv lock --check
+
+      - name: Compile source and release tools
+        run: UV_MANAGED_PYTHON=1 uv run --frozen --python 3.13 python -m compileall src tests scripts
+
+      - name: Run unit and cross-platform quality gate
+        run: UV_MANAGED_PYTHON=1 uv run --frozen --python 3.13 pytest tests/unit tests/cross_platform -q -p no:cacheprovider
+
+      - name: Validate version tag
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          UV_MANAGED_PYTHON=1 uv run --frozen --python 3.13 python -c 'import os,tomllib; from pathlib import Path; version=tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]; expected=f"v{version}"; actual=os.environ["GITHUB_REF_NAME"]; assert actual == expected, f"tag {actual} does not match {expected}"'
+
+      - name: Confirm workflow verification made no source changes
+        run: test -z "$(git status --porcelain)"
+
+  publish:
+    if: github.event_name == 'push'
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout exact tag commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false
+
+      - name: Build deterministic source assets
+        shell: bash
+        run: |
+          mkdir -p dist
+          git archive --format=tar --prefix=m32-bridge/ "$GITHUB_SHA" | gzip -n > dist/m32-bridge-source.tar.gz
+          git archive --format=zip --prefix=m32-bridge/ -o dist/m32-bridge-source.zip "$GITHUB_SHA"
+          cp scripts/install.sh dist/install.sh
+          cp scripts/install.ps1 dist/install.ps1
+
+      - name: Build Release manifest and checksums
+        shell: bash
+        run: |
+          PUBLISHED_AT="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          UV_MANAGED_PYTHON=1 uv run --frozen --python 3.13 python scripts/build_release_manifest.py --source-root . --assets-dir dist --release-tag "$GITHUB_REF_NAME" --source-commit "$GITHUB_SHA" --published-at "$PUBLISHED_AT"
+
+      - name: Verify required six assets only
+        shell: bash
+        run: |
+          test -f dist/install.sh
+          test -f dist/install.ps1
+          test -f dist/m32-bridge-source.tar.gz
+          test -f dist/m32-bridge-source.zip
+          test -f dist/m32-bridge-release.json
+          test -f dist/SHA256SUMS
+          test "$(find dist -maxdepth 1 -type f | wc -l | tr -d ' ')" = "6"
+
+      - name: Publish GitHub Release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          PRERELEASE_FLAG=""
+          case "$GITHUB_REF_NAME" in *-*) PRERELEASE_FLAG="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/install.sh dist/install.ps1 dist/m32-bridge-source.tar.gz dist/m32-bridge-source.zip dist/m32-bridge-release.json dist/SHA256SUMS --verify-tag --generate-notes $PRERELEASE_FLAG

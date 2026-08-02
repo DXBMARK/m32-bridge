@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
 from m32_bridge.config.runtime import default_user_config_path, resolve_runtime_config
+from m32_bridge.installer.application_version import application_version, validate_project_version
 from m32_bridge.installer.paths import default_install_location
 from m32_bridge.installer.platforms import installation_target
 
@@ -42,7 +44,7 @@ def resolve_installed_launcher(
     local_app_data: Path | str | None = None,
     os_family: str | None = None,
 ) -> dict[str, Any]:
-    env = dict(environ or {})
+    env = dict(os.environ if environ is None else environ)
     family = os_family or _os_family(env)
     target = installation_target(
         os_family=family,
@@ -51,6 +53,7 @@ def resolve_installed_launcher(
     )
     location = default_install_location(target, home=home, local_app_data=local_app_data or env.get("LOCALAPPDATA"))
     return {
+        "app_path": str(location.app_path),
         "launcher_path": str(location.launcher_path),
         "launcher_exists": location.launcher_path.exists(),
         "launcher_executable": location.launcher_path.is_file() and _is_executable(location.launcher_path),
@@ -67,11 +70,16 @@ def render_mcp_guidance(
     os_family: str | None = None,
     client: str = "all",
     local_app_data: Path | str | None = None,
-    version: str = "0.1.0",
+    version: str | None = None,
 ) -> dict[str, Any]:
-    env = dict(environ or {})
+    env = dict(os.environ if environ is None else environ)
     selected_client = client if client in {*CLIENT_IDS, "all"} else "all"
     launcher = resolve_installed_launcher(environ=env, home=home, local_app_data=local_app_data, os_family=os_family)
+    resolved_version = (
+        validate_project_version(version)
+        if version is not None
+        else application_version(launcher["app_path"], environ=env)
+    )
     runtime_config_path = (home / ".m32-bridge" / "runtime.yaml") if home is not None else default_user_config_path()
     resolution = resolve_runtime_config(environ=env, user_config_path=runtime_config_path, allow_project_local=False)
     warnings = _environment_override_warnings(env)
@@ -82,7 +90,7 @@ def render_mcp_guidance(
         "ok": True,
         "status": "MCP_GUIDANCE_READY",
         "product": PRODUCT,
-        "version": version,
+        "version": resolved_version,
         "server_name": SERVER_NAME,
         "launcher_path": launcher["launcher_path"],
         "launcher_exists": launcher["launcher_exists"],

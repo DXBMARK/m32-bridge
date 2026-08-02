@@ -27,9 +27,9 @@ def render_lifecycle_guidance(
     resolved_app_path = Path(app_path) if app_path is not None else location.app_path
     resolved_launcher_path = Path(launcher_path) if launcher_path is not None else location.launcher_path
     resolved_config_path = Path(config_path) if config_path is not None else _config_path(surface=surface, home=home, local_app_data=local_app_data)
-    partial_failure = install_status == "partial_failure"
+    failure_state = install_status in {"partial_failure", "failed"}
     return {
-        "ok": not partial_failure,
+        "ok": not failure_state,
         "status": "lifecycle_guidance",
         "result_status": install_status,
         "structured": True,
@@ -56,6 +56,8 @@ def render_lifecycle_guidance(
             "github_public_repo_after_push": "https://github.com/DXBMARK/m32-bridge",
             "stable_install_command": "download-inspect-run scripts/install.sh or scripts/install.ps1",
             "version_tag_guidance": "Use a version/tag after the public repository has the installer changes pushed.",
+            "release_manifest": "implemented",
+            "sha256_checksums": "implemented",
             "raw_live_install_test": "deferred until after commit/push",
         },
         "future_packaging": _future_packaging(),
@@ -155,7 +157,5 @@ def _future_packaging() -> list[dict[str, Any]]:
         "Claude .dxt",
         "USB portable kit",
         "code signing",
-        "checksums",
-        "GitHub Releases",
     ]
     return [{"kind": kind, "status": "future_only", "implemented_now": False} for kind in kinds]

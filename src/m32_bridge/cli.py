@@ -36,30 +36,27 @@ def setup_info_probe(*args: Any, **kwargs: Any) -> dict[str, Any]:
 
 
 def health() -> dict[str, Any]:
-    from m32_bridge.installer.runtime_manager import local_runtime_diagnostics
+    from m32_bridge.installer.runtime_status import build_runtime_health
 
     runtime_environ = dict(os.environ)
-    installed_uv = runtime_environ.get("M32_BRIDGE_UV_BIN")
-    if installed_uv:
-        runtime_environ["PATH"] = str(Path(installed_uv).parent) + os.pathsep + runtime_environ.get("PATH", "")
-    runtime = local_runtime_diagnostics(
+    result = build_runtime_health(
+        {
+            "app_path": runtime_environ.get("M32_BRIDGE_APP_DIR"),
+            "launcher_path": runtime_environ.get("M32_BRIDGE_LAUNCHER"),
+        },
         environ=runtime_environ,
-        app_path=runtime_environ.get("M32_BRIDGE_APP_DIR"),
-        launcher_path=runtime_environ.get("M32_BRIDGE_LAUNCHER"),
     )
-    precondition = evaluate_console_precondition(environ=dict(os.environ))
-    invalid = precondition.state == "config_invalid"
-    configured = precondition.configured
-    result = _base_result("health", "CONFIG_INVALID" if invalid else "ok")
-    result["ok"] = not invalid
+    invalid = result["configuration_state"] == "invalid"
+    configured = result["configuration_state"] == "valid"
+    result.update(_base_result("health", "CONFIG_INVALID" if invalid else result["status"]))
+    result["ok"] = bool(result["application_health"] == "healthy" and not invalid)
     if invalid:
         result["error_code"] = "CONFIG_INVALID"
     result["checks"] = {
         "cli": "ok",
-        "runtime": runtime,
+        "runtime": result["application"],
         "config": "invalid" if invalid else ("present" if configured else "not_configured"),
-        "launcher": runtime.get("launcher_file"),
-        "source": "local_checkout" if Path("pyproject.toml").is_file() else "installed_user_local",
+        "launcher": result["application"].get("launcher_executable"),
         "console_probe": "not_run",
         "network_scan": "not_run",
         "osc_writes_sent": 0,
@@ -67,30 +64,25 @@ def health() -> dict[str, Any]:
         "webui": "absent",
         "production_live_ready": False,
     }
-    result["osc_writes_sent"] = 0
-    result["hardware_verified"] = False
-    result["production_live_ready"] = False
     result.update(
         {
-            "application_runtime": "healthy",
-            "managed_python": "ready" if runtime.get("managed_python_detected") else "not_checked",
+            "application_runtime": result["application_health"],
+            "managed_python": result["application"]["managed_python"],
             "frozen_launcher": "enabled",
             "console_configured": configured,
-            "console_connection": "not_checked",
-            "operational_readiness": "config_invalid" if invalid else ("ready" if configured else "setup_required"),
-            "next_action": (
-                None
-                if configured
-                else (
-                    "Repair the saved configuration or run m32-bridge setup"
-                    if invalid
-                    else "Run m32-bridge setup"
-                )
-            ),
+            "console_connection": result["connection_state"],
+            "operational_readiness": result["operational_state"],
+            "next_action": result["configuration_readiness"]["next_action"],
+            "precondition_state": "config_invalid" if invalid else ("ready" if configured else "setup_required"),
+            "required_action": None if configured else "m32-bridge setup",
+            "attempted_path": "not_attempted",
+            "console_probe": "not_run",
+            "network_scan": "not_run",
+            "osc_writes_sent": 0,
+            "hardware_verified": False,
+            "production_live_ready": False,
         }
     )
-    result.update(precondition.as_dict(include_error_code=invalid))
-    result["console_connection"] = "not_checked"
     return result
 
 
@@ -779,6 +771,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "mcp-config" and not args.json:
         print(_render_mcp_config_cli_text(result), file=sys.stdout)
+    elif args.command == "status" and not args.json:
+        print(_render_status_cli_text(result), file=sys.stdout)
     else:
         print(json.dumps(result, sort_keys=True), file=sys.stdout)
     return 0 if result.get("ok") is True or result.get("status") == "ok" else 1
@@ -831,9 +825,39 @@ def _render_mcp_config_cli_text(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _render_status_cli_text(payload: dict[str, Any]) -> str:
+    lines = ["RUNTIME STATUS", "=" * 60]
+    for section_name, key in (
+        ("APPLICATION", "application"),
+        ("PLATFORM", "platform"),
+        ("PYTHON RUNTIME", "python_runtime"),
+        ("INSTALLATION SOURCE", "installation_source"),
+        ("SOURCE CONNECTIVITY", "source_connectivity"),
+        ("CONSOLE CONFIGURATION", "console_configuration"),
+        ("CONSOLE CONNECTION", "console_connection"),
+        ("SAFETY", "safety"),
+    ):
+        lines.extend(["", section_name, "-" * 60])
+        values = payload.get(key) if isinstance(payload.get(key), dict) else {}
+        for field, value in values.items():
+            lines.append(f"{field.replace('_', ' ').title():28}: {str(value).lower() if isinstance(value, bool) else value}")
+    return "\n".join(lines)
+
+
 def _run_command(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "health":
         return health()
+    if args.command == "status":
+        from m32_bridge.installer.runtime_status import build_runtime_status
+
+        return build_runtime_status(
+            {
+                "app_path": os.environ.get("M32_BRIDGE_APP_DIR"),
+                "launcher_path": os.environ.get("M32_BRIDGE_LAUNCHER"),
+            },
+            environ=dict(os.environ),
+            refresh=bool(args.refresh),
+        )
     if args.command == "doctor":
         return doctor(config_path=args.config)
     if args.command == "doctor-runtime":
@@ -922,6 +946,9 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=False)
     subparsers.add_parser("run", help="Open the branded Runtime Console")
     subparsers.add_parser("health")
+    status_parser = subparsers.add_parser("status")
+    status_parser.add_argument("--refresh", action="store_true")
+    status_parser.add_argument("--json", action="store_true")
 
     doctor_parser = subparsers.add_parser("doctor")
     doctor_parser.add_argument("--config", type=Path, default=Path("config.example.yaml"))

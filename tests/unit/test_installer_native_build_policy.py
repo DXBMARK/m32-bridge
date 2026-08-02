@@ -73,7 +73,7 @@ def test_missing_locked_wheel_is_controlled_and_full_output_goes_to_private_log(
     applied = script_runtime.perform_apply_install("posix", result, uv_bin=str(uv_bin))
 
     assert applied["ok"] is False
-    assert applied["status"] == "partial_failure"
+    assert applied["status"] == "failed"
     assert applied["error_code"] == "LOCKED_WHEEL_UNAVAILABLE"
     assert applied["failed_step"] == "application_sync"
     assert applied["dependency_package"] == "native-demo==1.0.0"
@@ -86,6 +86,12 @@ def test_missing_locked_wheel_is_controlled_and_full_output_goes_to_private_log(
     assert applied["runtime_info"]["network_scan"] == "not_run"
     assert applied["runtime_info"]["console_probe"] == "not_run"
     assert applied["osc_writes_sent"] == 0
+    assert applied["lifecycle_guidance"]["ok"] is False
+    assert applied["lifecycle_guidance"]["result_status"] == "failed"
+    assert "runtime_handoff" not in applied
+    assert not Path(result["app_path"]).exists()
+    assert not Path(result["launcher_path"]).exists()
+    assert not (Path(result["app_path"]).parent / "install-metadata.json").exists()
     assert "pre-built dependency wheel" in applied["message"].lower()
     assert "compiler" in applied["message"].lower()
     assert "build-essential" not in applied["message"].lower()

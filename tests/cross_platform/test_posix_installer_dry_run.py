@@ -74,10 +74,17 @@ def test_posix_script_supports_local_checkout_and_github_raw_bootstrap_modes():
     assert 'src/m32_bridge' in text
     assert 'pyproject.toml' in text
     assert 'INSTALL_SOURCE="local_checkout"' in text
-    assert 'INSTALL_SOURCE="github_release_or_archive"' in text
+    assert 'INSTALL_SOURCE="github_release_asset"' in text
+    assert 'INSTALL_SOURCE="github_commit_archive"' in text
+    assert 'INSTALL_SOURCE="github_main"' in text
     assert "M32_INSTALL_SOURCE_URL" in text
     assert "M32_INSTALL_SOURCE_REF" in text
-    assert "https://github.com/DXBMARK/m32-bridge/archive/refs/heads/main.tar.gz" in text
+    assert "secure_bootstrap.py" in text
+    assert "bootstrap-plan.json" in text
+    assert "--bootstrap-plan" in text
+    assert "tar -xzf" not in text
+    assert "resolve_prerelease_tag" not in text
+    assert "resolve_main_commit" not in text
     assert "m32-ai-mcp-bridge" not in text
 
 
@@ -103,7 +110,7 @@ def test_posix_remote_bootstrap_missing_uv_is_structured_not_success(tmp_path):
     payload = json.loads(completed.stdout)
     assert payload["ok"] is False
     assert payload["status"] == "RUNTIME_SETUP_REQUIRED"
-    assert payload["install_source"] in {"github_raw", "github_release_or_archive"}
+    assert payload["install_source"] == "github_release_asset"
     assert payload["source_url"] == "https://github.com/example/m32/archive/refs/heads/main.tar.gz"
     assert payload["installer_can_continue"] is False
     assert payload["required_actions"][0]["requires_confirmation"] is True
@@ -133,7 +140,7 @@ def test_posix_local_checkout_dry_run_uses_local_source_metadata(tmp_path):
     assert completed.returncode == 0
     payload = json.loads(completed.stdout)
     assert payload["install_source"] == "local_checkout"
-    assert payload["source_url"]
+    assert payload["source_url"] is None
     assert payload["installer_can_continue"] is True
     assert payload["required_actions"] == []
     assert payload["osc_writes_sent"] == 0

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from m32_bridge.config.runtime import resolve_runtime_config
+from m32_bridge.installer.application_version import application_version
 from m32_bridge.installer.ide_detector import detect_ide_clients
 from m32_bridge.installer.mcp_guidance import render_mcp_guidance
 from m32_bridge.installer.paths import default_install_location
@@ -18,8 +19,6 @@ from m32_bridge.installer.runtime_manager import (
     managed_python_policy,
 )
 
-
-VERSION = "0.1.0"
 
 
 NEXT_COMMANDS = [
@@ -41,6 +40,7 @@ def render_post_install_verification(
     env = dict(environ or {})
     target = _target_from_environment(env)
     location = default_install_location(target, home=home, local_app_data=local_app_data or env.get("LOCALAPPDATA"))
+    resolved_version = application_version(location.app_path, environ=env)
     runtime = detect_uv_status()
     runtime_info = inspect_runtime(environ=env)
     uv_detected = runtime.uv_status in {"present", "installed_user_local"}
@@ -49,13 +49,19 @@ def render_post_install_verification(
     surface = "windows" if target.os_family == "windows" else "posix"
     required_actions = [] if uv_detected else [_uv_required_action(surface, _dependency_target_root(surface, home, local_app_data))]
 
-    mcp_guidance = render_mcp_guidance(environ=env, home=home, os_family=target.os_family)
+    mcp_guidance = render_mcp_guidance(
+        environ=env,
+        home=home,
+        os_family=target.os_family,
+        local_app_data=local_app_data,
+        version=resolved_version,
+    )
 
     return {
         "ok": True,
         "status": "verification_guidance",
         "structured": True,
-        "version": VERSION,
+        "version": resolved_version,
         "install_source": "local_checkout",
         "platform": target.output_platform,
         "os_family": target.os_family,

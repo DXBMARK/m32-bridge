@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 import m32_bridge.cli as cli_module
 
 
@@ -84,14 +86,58 @@ def test_mcp_guidance_reports_environment_overrides_without_duplicating_endpoint
     assert all(client["environment"] == {} for client in guidance["client_guidance"])
 
 
+def test_mcp_guidance_reads_version_from_installed_pyproject(tmp_path):
+    from m32_bridge.installer.mcp_guidance import render_mcp_guidance, resolve_installed_launcher
+
+    app = tmp_path / ".m32-bridge" / "app"
+    app.mkdir(parents=True)
+    (app / "pyproject.toml").write_text(
+        "[project]\nname='m32-mcp-bridge'\nversion='4.5.6'\n",
+        encoding="utf-8",
+    )
+    env = {
+        "M32_BRIDGE_APP_DIR": str(app),
+        "M32_BRIDGE_INSTALLED_RUNTIME": "1",
+    }
+
+    launcher = resolve_installed_launcher(home=tmp_path, environ=env, os_family="linux")
+    guidance = render_mcp_guidance(home=tmp_path, environ=env, os_family="linux")
+
+    assert launcher["app_path"] == str(app)
+    assert guidance["version"] == "4.5.6"
+
+
+def test_mcp_guidance_rejects_invalid_explicit_version(tmp_path):
+    from m32_bridge.installer.mcp_guidance import render_mcp_guidance
+
+    with pytest.raises(ValueError, match="PROJECT_VERSION_INVALID"):
+        render_mcp_guidance(
+            home=tmp_path,
+            environ={},
+            os_family="linux",
+            version="unknown",
+        )
+
+
 def test_post_install_verification_includes_mcp_guidance(tmp_path, monkeypatch):
     from m32_bridge.installer import verification
     from m32_bridge.installer.runtime_manager import RuntimeManagerState
 
     monkeypatch.setattr(verification, "detect_uv_status", lambda: RuntimeManagerState(uv_status="present"))
+    app = tmp_path / ".m32-bridge" / "app"
+    app.mkdir(parents=True)
+    (app / "pyproject.toml").write_text(
+        "[project]\nname='m32-mcp-bridge'\nversion='4.5.6'\n",
+        encoding="utf-8",
+    )
 
-    output = verification.render_post_install_verification(environ={}, home=tmp_path)
+    output = verification.render_post_install_verification(
+        environ={"M32_BRIDGE_INSTALLED_RUNTIME": "1"},
+        home=tmp_path,
+    )
 
+    assert output["version"] == "4.5.6"
+    assert output["mcp_guidance"]["version"] == output["version"]
     assert output["mcp_guidance"]["command"] == str(tmp_path / ".local" / "bin" / "m32-bridge")
     assert output["mcp_guidance"]["args"] == ["mcp-server"]
     assert output["mcp_guidance"]["manual_copy_only"] is True

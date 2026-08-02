@@ -4,6 +4,7 @@ import io
 import json
 import os
 import stat
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,26 @@ from jsonschema import Draft202012Validator
 class TTYBuffer(io.StringIO):
     def isatty(self) -> bool:
         return True
+
+
+def _healthy_installed_runtime(tmp_path: Path) -> tuple[Path, Path, dict]:
+    app = tmp_path / "app"
+    (app / ".venv").mkdir(parents=True, exist_ok=True)
+    (app / "src" / "m32_bridge").mkdir(parents=True, exist_ok=True)
+    (app / "pyproject.toml").write_text("[project]\nname='m32-mcp-bridge'\nversion='0.1.0'\n", encoding="utf-8")
+    (app / "src" / "m32_bridge" / "__init__.py").write_text("", encoding="utf-8")
+    launcher = tmp_path / "bin" / "m32-bridge"
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    runtime = {
+        "application_runtime_ready": True,
+        "status": "ok",
+        "uv_detected": True,
+        "uv_path": "/opt/uv",
+        "managed_python_version": "3.13.14",
+    }
+    return app, launcher, runtime
 
 
 def test_interactive_no_args_and_run_dispatch_to_runtime_tty(monkeypatch):
@@ -142,11 +163,12 @@ def test_runtime_import_provenance_rejects_bootstrap_source(monkeypatch, tmp_pat
 def test_runtime_header_prompt_and_main_state_are_not_installer_branded(tmp_path):
     from m32_bridge.installer.tty_app import render_full_screen, strip_ansi
 
+    app, launcher, runtime = _healthy_installed_runtime(tmp_path)
     result = {
         "tty_mode": "runtime",
-        "app_path": str(tmp_path / "app"),
-        "launcher_path": str(tmp_path / "bin" / "m32-bridge"),
-        "runtime_info": {"application_runtime_ready": True, "managed_python_version": "3.13.14"},
+        "app_path": str(app),
+        "launcher_path": str(launcher),
+        "runtime_info": runtime,
         "console_configured": False,
         "console_connection_status": "not_checked",
         "status": "ok",
@@ -157,8 +179,10 @@ def test_runtime_header_prompt_and_main_state_are_not_installer_branded(tmp_path
     assert "RUNTIME CONSOLE" in text
     assert "X32-BRIDGE MCP INSTALLER" not in text
     assert "m32-bridge > /" in prompt_text
-    assert "NEXT ACTION" in text
-    assert "Run /setup" in text
+    assert "SYSTEM" in text
+    assert "Configuration state" in text
+    assert "RUNTIME HEALTHY" in text
+    assert "RUNTIME READY" not in text
 
 
 def test_command_registry_centralizes_setup_requirements():
@@ -179,7 +203,7 @@ def test_runtime_help_and_contact_never_present_themselves_as_installer(tmp_path
     help_text, _ = execute_installer_command("/help", result)
     contact_text, _ = execute_installer_command("/contact", result)
     assert "RUNTIME CONSOLE HELP" in help_text
-    assert "RUNTIME CONSOLE" in contact_text
+    assert "CONTACT" in contact_text
     assert "INSTALLER" not in help_text.upper()
     assert "INSTALLER" not in contact_text.upper()
 
@@ -204,18 +228,19 @@ def test_health_before_setup_is_healthy_with_setup_required_readiness(monkeypatc
     from m32_bridge.installer import tty_app
 
     monkeypatch.setenv("HOME", str(tmp_path))
+    app, launcher, runtime = _healthy_installed_runtime(tmp_path)
     output, stop = tty_app.execute_installer_command(
         "/health",
         {
             "tty_mode": "runtime",
-            "app_path": str(tmp_path / "app"),
-            "launcher_path": str(tmp_path / "bin" / "m32-bridge"),
-            "runtime_info": {"application_runtime_ready": True},
+            "app_path": str(app),
+            "launcher_path": str(launcher),
+            "runtime_info": runtime,
         },
     )
     assert "Application runtime" in output and "healthy" in output
     assert "Console configured" in output and "false" in output
-    assert "Operational readiness" in output and "setup_required" in output
+    assert "Operational state" in output and "setup_required" in output
     assert "not_checked" in output and "not_run" in output
     assert stop is False
 
@@ -429,7 +454,7 @@ def test_health_with_valid_config_is_ready_without_probe(monkeypatch, tmp_path):
     payload = cli.health()
     assert payload["ok"] is True
     assert payload["console_configured"] is True
-    assert payload["operational_readiness"] == "ready"
+    assert payload["operational_readiness"] == "console_not_checked"
     assert payload["console_connection"] == "not_checked"
     assert payload["console_probe"] == "not_run"
 
@@ -467,12 +492,12 @@ def test_tty_invalid_config_is_not_setup_required(monkeypatch, tmp_path):
 def test_safe_retry_metadata_requires_all_three_flags(monkeypatch):
     from m32_bridge.installer import tty_app
 
-    metadata = tty_app.COMMAND_REGISTRY["/get-info"]
+    metadata = tty_app.RUNTIME_COMMAND_REGISTRY["/get-info"]
     assert tty_app._can_retry_after_setup("/get-info") is True
     for key in ("requires_console_config", "read_only", "safe_to_retry_after_setup"):
-        monkeypatch.setitem(metadata, key, False)
+        monkeypatch.setitem(tty_app.RUNTIME_COMMAND_REGISTRY, "/get-info", replace(metadata, **{key: False}))
         assert tty_app._can_retry_after_setup("/get-info") is False
-        monkeypatch.setitem(metadata, key, True)
+        monkeypatch.setitem(tty_app.RUNTIME_COMMAND_REGISTRY, "/get-info", metadata)
 
 
 def test_safe_retry_requires_ready_precondition(monkeypatch, tmp_path):
@@ -493,7 +518,8 @@ def test_command_requiring_config_is_blocked_even_when_not_safe_to_retry(monkeyp
     from m32_bridge.runtime_preconditions import ConsolePrecondition
 
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setitem(tty_app.COMMAND_REGISTRY["/get-info"], "read_only", False)
+    metadata = tty_app.RUNTIME_COMMAND_REGISTRY["/get-info"]
+    monkeypatch.setitem(tty_app.RUNTIME_COMMAND_REGISTRY, "/get-info", replace(metadata, read_only=False))
     calls = []
     setup_calls = []
     monkeypatch.setattr(tty_app, "evaluate_console_precondition", lambda: ConsolePrecondition.setup_required())
@@ -512,7 +538,6 @@ def test_command_requiring_config_is_blocked_even_when_not_safe_to_retry(monkeyp
     assert calls == []
     assert setup_calls == []
     assert "SETUP REQUIRED" in transcript
-    assert "Run /setup" in transcript
 
 
 def test_config_invalid_command_handler_is_never_called_and_does_not_start_setup(monkeypatch, tmp_path):
@@ -577,9 +602,13 @@ def test_saved_non_string_host_is_config_invalid(monkeypatch, tmp_path):
     assert evaluate_console_precondition().state == "config_invalid"
 
 
-def test_runtime_main_screen_distinguishes_invalid_config():
+def test_runtime_main_screen_distinguishes_invalid_config(monkeypatch, tmp_path):
     from m32_bridge.installer.tty_app import render_full_screen, strip_ansi
 
+    monkeypatch.setenv("HOME", str(tmp_path))
+    config = tmp_path / ".m32-bridge" / "runtime.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text("host: [unterminated\n", encoding="utf-8")
     result = {
         "tty_mode": "runtime",
         "ok": True,
@@ -591,7 +620,7 @@ def test_runtime_main_screen_distinguishes_invalid_config():
     }
     text = strip_ansi(render_full_screen("posix", result, dry_run=False, color=False, width=100, height=28))
     assert "Configuration state" in text and "invalid" in text
-    assert "Repair the saved configuration or run /setup" in text
+    assert "CONFIG INVALID" in text
 
 
 def test_manual_setup_opens_with_malformed_config_and_cancel_keeps_tty_alive(monkeypatch, tmp_path):

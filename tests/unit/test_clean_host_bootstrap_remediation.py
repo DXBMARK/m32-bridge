@@ -5,9 +5,9 @@ import json
 import os
 from pathlib import Path
 import select
+import shutil
 import subprocess
 import sys
-import tarfile
 import time
 
 from m32_bridge.installer.runtime_manager import RuntimeManagerState
@@ -294,12 +294,15 @@ def test_posix_clean_host_reuses_new_uv_in_same_tty_process(tmp_path):
     remote_script.parent.mkdir()
     remote_script.write_text(POSIX_INSTALLER.read_text(encoding="utf-8"), encoding="utf-8")
     remote_script.chmod(0o755)
-    source_archive = tmp_path / "source.tar.gz"
-    with tarfile.open(source_archive, "w:gz") as archive:
-        archive.add(ROOT / "pyproject.toml", arcname="m32-bridge-main/pyproject.toml")
-        archive.add(ROOT / "uv.lock", arcname="m32-bridge-main/uv.lock")
-        archive.add(ROOT / ".python-version", arcname="m32-bridge-main/.python-version")
-        archive.add(ROOT / "src", arcname="m32-bridge-main/src")
+    # Build a deterministic local checkout beside the copied standalone script.
+    # This test is about reusing the newly installed uv in the same TTY process,
+    # not about contacting GitHub or resolving a published Release.
+    (tmp_path / "pyproject.toml").write_bytes((ROOT / "pyproject.toml").read_bytes())
+    (tmp_path / "uv.lock").write_bytes((ROOT / "uv.lock").read_bytes())
+    python_version = ROOT / ".python-version"
+    if python_version.is_file():
+        (tmp_path / ".python-version").write_bytes(python_version.read_bytes())
+    shutil.copytree(ROOT / "src", tmp_path / "src")
     fake_curl = fake_bin / "curl"
     fake_curl.write_text(
         "#!/bin/sh\n"
@@ -316,7 +319,7 @@ def test_posix_clean_host_reuses_new_uv_in_same_tty_process(tmp_path):
         "    printf '%s\\n' 'cp \"$FAKE_UV_TEMPLATE\" \"$HOME/.local/bin/uv\"' >> \"$target\"\n"
         "    printf '%s\\n' 'chmod +x \"$HOME/.local/bin/uv\"' >> \"$target\"\n"
         "    ;;\n"
-        "  *) cp \"$FAKE_SOURCE_ARCHIVE\" \"$target\" ;;\n"
+        "  *) printf '%s\\n' 'unexpected network request' >&2; exit 97 ;;\n"
         "esac\n",
         encoding="utf-8",
     )
@@ -366,7 +369,6 @@ def test_posix_clean_host_reuses_new_uv_in_same_tty_process(tmp_path):
             "PATH": f"{fake_bin}:/usr/bin:/bin",
             "TERM": "dumb",
             "FAKE_UV_TEMPLATE": str(fake_uv_template),
-            "FAKE_SOURCE_ARCHIVE": str(source_archive),
             "FAKE_UV_LOG": str(uv_log),
             "FAKE_MANAGED_PYTHON": str(fake_python),
             "FAKE_BOOTSTRAP_PYTHON": sys.executable,
@@ -376,7 +378,7 @@ def test_posix_clean_host_reuses_new_uv_in_same_tty_process(tmp_path):
 
     master_fd, slave_fd = os.openpty()
     process = subprocess.Popen(
-        ["/bin/sh", str(remote_script)],
+        ["/bin/sh", str(remote_script), "--local"],
         cwd=remote_script.parent,
         env=env,
         stdin=slave_fd,
@@ -439,7 +441,8 @@ def test_posix_clean_host_reuses_new_uv_in_same_tty_process(tmp_path):
     assert calls.count("run --frozen --managed-python --python 3.13 --no-build --no-sync") == 2
     assert "uv 0.12.1" in rendered
     assert "Python 3.13.14" in rendered
-    assert "github_release_or_archive" in rendered
+    assert "local_checkout" in rendered
+    assert "unexpected network request" not in rendered
     assert "\x1b[" not in rendered
     assert (home / ".m32-bridge" / "app" / ".venv").is_dir()
     assert (home / ".local" / "bin" / "m32-bridge").is_file()

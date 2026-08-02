@@ -51,10 +51,16 @@ def test_windows_script_supports_local_checkout_and_github_bootstrap_metadata():
     assert "src\\m32_bridge" in text or "src/m32_bridge" in text
     assert "pyproject.toml" in text
     assert "local_checkout" in text
-    assert "github_release_or_archive" in text
+    assert "github_release_asset" in text
+    assert "github_commit_archive" in text
+    assert "github_main" in text
     assert "M32_INSTALL_SOURCE_URL" in text
     assert "M32_INSTALL_SOURCE_REF" in text
-    assert "https://github.com/DXBMARK/m32-bridge/archive/refs/heads/main.zip" in text
+    assert "secure_bootstrap.py" in text
+    assert "bootstrap-plan.json" in text
+    assert "--bootstrap-plan" in text
+    assert "Expand-Archive" not in text
+    assert "Resolve-GithubValue" not in text
     assert "m32-ai-mcp-bridge" not in text
     assert "source_url" in text
     assert "installer_can_continue" in text

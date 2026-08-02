@@ -10,7 +10,6 @@ from m32_bridge.cli import detect_device_runtime
 from m32_bridge.installer.runtime_manager import (
     APPROVED_PYTHON_MINOR,
     MANAGED_PYTHON_POLICY,
-    OFFICIAL_SOURCE_ARCHIVE_URLS,
     PROJECT_PYTHON_RANGE,
     UV_INSTALL_URLS,
     bootstrap_uv_and_python,
@@ -19,6 +18,7 @@ from m32_bridge.installer.runtime_manager import (
     local_runtime_diagnostics,
     platform_information,
 )
+from m32_bridge.installer.release_selection import resolve_installation_selection
 from m32_bridge.installer.script_runtime import build_install_result
 from m32_bridge.installer.tty_app import (
     CONTACT_PHONE,
@@ -36,6 +36,30 @@ from m32_bridge.installer.tty_app import (
 ROOT = Path(__file__).resolve().parents[2]
 POSIX_INSTALLER = ROOT / "scripts" / "install.sh"
 WINDOWS_INSTALLER = ROOT / "scripts" / "install.ps1"
+PINNED_COMMIT = "a" * 40
+
+
+def _pinned_source_result(tmp_path: Path) -> dict:
+    from m32_bridge.installer.install_metadata import build_official_release_urls
+
+    result = build_install_result(
+        surface="posix",
+        platform="linux",
+        dry_run=True,
+        home=tmp_path,
+    )
+    urls = build_official_release_urls("posix", PINNED_COMMIT)
+    result.update(
+        {
+            "install_source": "github_commit_archive",
+            "source_ref": PINNED_COMMIT,
+            "source_commit": PINNED_COMMIT,
+            "source_url": urls["source_archive_url"],
+            "source_archive_url": urls["source_archive_url"],
+            "raw_installer_url": urls["raw_installer_url"],
+        }
+    )
+    return result
 
 
 def test_approved_python_policy_is_minor_pinned_and_user_local():
@@ -114,12 +138,24 @@ def test_script_runtime_policy_parity_and_no_dependency_drift_commands():
     assert f'APPROVED_PYTHON_MINOR="{APPROVED_PYTHON_MINOR}"' in posix
     assert f'PROJECT_PYTHON_RANGE="{PROJECT_PYTHON_RANGE}"' in posix
     assert f'UV_INSTALL_URL_POSIX="{UV_INSTALL_URLS["posix"]}"' in posix
-    assert f'DEFAULT_SOURCE_URL="{OFFICIAL_SOURCE_ARCHIVE_URLS["posix"]}"' in posix
     assert f'$ApprovedPythonMinor = "{APPROVED_PYTHON_MINOR}"' in windows
     assert f'$ProjectPythonRange = "{PROJECT_PYTHON_RANGE}"' in windows
     assert f'$UvInstallUrlWindows = "{UV_INSTALL_URLS["windows"]}"' in windows
-    assert f'$DefaultSourceUrl = "{OFFICIAL_SOURCE_ARCHIVE_URLS["windows"]}"' in windows
+    assert "DEFAULT_SOURCE_URL" not in posix
+    assert "$DefaultSourceUrl" not in windows
+
+    standalone = resolve_installation_selection(environ={}, source_root=ROOT / "missing-standalone")
+    checkout = resolve_installation_selection(environ={}, source_root=ROOT)
+    main = resolve_installation_selection(channel="main", environ={}, source_root=ROOT)
+    assert standalone.kind == "stable" and standalone.origin == "default"
+    assert checkout.kind == "local" and checkout.origin == "auto_local"
+    assert main.kind == "main" and main.origin == "cli"
+
     for text in (posix, windows):
+        assert "--version" in text
+        assert "--channel" in text
+        assert "--ref" in text
+        assert "--local" in text
         assert "uv lock" not in text
         assert "--default" not in text
         assert "configured_for_github" not in text
@@ -379,14 +415,7 @@ def test_unknown_command_does_not_exit_and_local_actions_are_in_process(tmp_path
 
 
 def test_status_is_honest_and_does_not_treat_configured_url_as_reachable(tmp_path):
-    result = build_install_result(
-        surface="posix",
-        platform="linux",
-        dry_run=True,
-        home=tmp_path,
-        install_source="github_release_or_archive",
-        source_url="https://github.com/DXBMARK/m32-bridge/archive/main.tar.gz",
-    )
+    result = _pinned_source_result(tmp_path)
 
     status = render_status_text(result)
     main = render_tty_installer("posix", result, dry_run=True)
@@ -412,14 +441,7 @@ def test_status_is_honest_and_does_not_treat_configured_url_as_reachable(tmp_pat
 
 
 def test_status_refresh_is_explicit_cached_and_never_probes_console(tmp_path):
-    result = build_install_result(
-        surface="posix",
-        platform="linux",
-        dry_run=True,
-        home=tmp_path,
-        source_url="https://github.com/DXBMARK/m32-bridge/archive/main.tar.gz",
-        install_source="github_release_or_archive",
-    )
+    result = _pinned_source_result(tmp_path)
     calls: list[str] = []
 
     def checker(url: str, timeout: float) -> str:
@@ -440,15 +462,47 @@ def test_status_refresh_is_explicit_cached_and_never_probes_console(tmp_path):
     assert result.get("console_connection_status") is None
 
 
-def test_status_refresh_force_runs_new_checks_and_updates_last_checked(tmp_path):
+def test_status_refresh_without_exact_source_identity_performs_no_network(tmp_path):
     result = build_install_result(
         surface="posix",
         platform="linux",
         dry_run=True,
         home=tmp_path,
-        source_url="https://github.com/DXBMARK/m32-bridge/archive/main.tar.gz",
-        install_source="github_release_or_archive",
     )
+    result.update({"install_source": "github_release_asset", "source_url": None})
+    calls: list[str] = []
+
+    refreshed = refresh_source_status(
+        result,
+        checker=lambda url, timeout: calls.append(url) or "reachable",
+        force=True,
+    )
+
+    assert calls == []
+    assert refreshed["last_checked"] == "not_run_source_identity_unavailable"
+    assert refreshed["github_repository"] == "not_checked"
+    assert refreshed["raw_installer"] == "not_checked"
+    assert refreshed["source_archive"] == "not_checked"
+
+
+def test_status_refresh_rejects_mismatched_pinned_url_without_network(tmp_path):
+    result = _pinned_source_result(tmp_path)
+    result["source_url"] = "https://github.com/DXBMARK/m32-bridge/archive/" + ("b" * 40) + ".tar.gz"
+    result.pop("source_archive_url", None)
+    calls: list[str] = []
+
+    refreshed = refresh_source_status(
+        result,
+        checker=lambda url, timeout: calls.append(url) or "reachable",
+        force=True,
+    )
+
+    assert calls == []
+    assert refreshed["last_checked"] == "not_run_source_identity_unavailable"
+
+
+def test_status_refresh_force_runs_new_checks_and_updates_last_checked(tmp_path):
+    result = _pinned_source_result(tmp_path)
     calls: list[str] = []
 
     def checker(url: str, timeout: float) -> str:
@@ -466,23 +520,44 @@ def test_status_refresh_force_runs_new_checks_and_updates_last_checked(tmp_path)
 
 
 def test_status_refresh_uses_exact_source_targets(tmp_path):
-    result = build_install_result(
-        surface="posix",
-        platform="linux",
-        dry_run=True,
-        home=tmp_path,
-        source_url="https://github.com/DXBMARK/m32-bridge/archive/refs/heads/main.tar.gz",
-        install_source="github_release_or_archive",
-    )
+    result = _pinned_source_result(tmp_path)
     calls: list[str] = []
 
     refresh_source_status(result, checker=lambda url, timeout: calls.append(url) or "reachable", force=True)
 
     assert "https://github.com/" in calls
     assert "https://github.com/DXBMARK/m32-bridge" in calls
-    assert "https://raw.githubusercontent.com/DXBMARK/m32-bridge/main/scripts/install.sh" in calls
-    assert "https://github.com/DXBMARK/m32-bridge/archive/refs/heads/main.tar.gz" in calls
+    assert f"https://raw.githubusercontent.com/DXBMARK/m32-bridge/{PINNED_COMMIT}/scripts/install.sh" in calls
+    assert f"https://github.com/DXBMARK/m32-bridge/archive/{PINNED_COMMIT}.tar.gz" in calls
     assert calls[0] != "https://github.com/DXBMARK/m32-bridge"
+
+
+def test_status_refresh_uses_exact_release_asset_targets(tmp_path):
+    tag = "v1.2.3"
+    archive_url = f"https://github.com/DXBMARK/m32-bridge/releases/download/{tag}/m32-bridge-source.tar.gz"
+    installer_url = f"https://github.com/DXBMARK/m32-bridge/releases/download/{tag}/install.sh"
+    result = build_install_result(surface="posix", platform="linux", dry_run=True, home=tmp_path)
+    result.update(
+        {
+            "install_source": "github_release_asset",
+            "release_tag": tag,
+            "source_commit": PINNED_COMMIT,
+            "source_ref": PINNED_COMMIT,
+            "source_url": archive_url,
+            "source_archive_url": archive_url,
+            "installer_asset_url": installer_url,
+        }
+    )
+    calls: list[str] = []
+
+    refresh_source_status(result, checker=lambda url, timeout: calls.append(url) or "reachable", force=True)
+
+    assert calls == [
+        "https://github.com/",
+        "https://github.com/DXBMARK/m32-bridge",
+        installer_url,
+        archive_url,
+    ]
 
 
 def test_derive_dns_status_mapping():
@@ -497,14 +572,7 @@ def test_derive_dns_status_mapping():
 
 
 def test_status_refresh_derives_dns_from_bounded_https_results(tmp_path):
-    result = build_install_result(
-        surface="posix",
-        platform="linux",
-        dry_run=True,
-        home=tmp_path,
-        source_url="https://github.com/DXBMARK/m32-bridge/archive/main.tar.gz",
-        install_source="github_release_or_archive",
-    )
+    result = _pinned_source_result(tmp_path)
 
     for status, expected_dns in [
         ("reachable", "resolved"),
@@ -520,14 +588,7 @@ def test_status_refresh_derives_dns_from_bounded_https_results(tmp_path):
 
 
 def test_status_refresh_mixed_dns_results(tmp_path):
-    result = build_install_result(
-        surface="posix",
-        platform="linux",
-        dry_run=True,
-        home=tmp_path,
-        source_url="https://github.com/DXBMARK/m32-bridge/archive/main.tar.gz",
-        install_source="github_release_or_archive",
-    )
+    result = _pinned_source_result(tmp_path)
     statuses = iter(["timeout", "reachable", "timeout", "not_checked"])
     assert refresh_source_status(result, checker=lambda url, timeout: next(statuses), force=True)["dns"] == "resolved"
 
@@ -536,14 +597,7 @@ def test_status_refresh_mixed_dns_results(tmp_path):
 
 
 def test_status_refresh_does_not_call_resolver_or_tcp_helpers(monkeypatch, tmp_path):
-    result = build_install_result(
-        surface="posix",
-        platform="linux",
-        dry_run=True,
-        home=tmp_path,
-        source_url="https://github.com/DXBMARK/m32-bridge/archive/main.tar.gz",
-        install_source="github_release_or_archive",
-    )
+    result = _pinned_source_result(tmp_path)
     monkeypatch.setattr("socket.getaddrinfo", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no DNS resolver call")))
     monkeypatch.setattr("socket.gethostbyname", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no DNS resolver call")))
     monkeypatch.setattr("socket.create_connection", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no TCP DNS probe")))
@@ -554,14 +608,7 @@ def test_status_refresh_does_not_call_resolver_or_tcp_helpers(monkeypatch, tmp_p
 
 
 def test_status_refresh_forwards_timeout_to_every_https_check(tmp_path):
-    result = build_install_result(
-        surface="posix",
-        platform="linux",
-        dry_run=True,
-        home=tmp_path,
-        source_url="https://github.com/DXBMARK/m32-bridge/archive/main.tar.gz",
-        install_source="github_release_or_archive",
-    )
+    result = _pinned_source_result(tmp_path)
     timeouts: list[float] = []
 
     refresh_source_status(result, checker=lambda url, timeout: timeouts.append(timeout) or "reachable", force=True, timeout=0.125)
@@ -585,14 +632,7 @@ def test_status_refresh_has_no_dns_worker_global_timeout_or_subprocess_logic():
 
 
 def test_refresh_guard_returns_cache_while_in_progress_without_new_workers(tmp_path):
-    result = build_install_result(
-        surface="posix",
-        platform="linux",
-        dry_run=True,
-        home=tmp_path,
-        source_url="https://github.com/DXBMARK/m32-bridge/archive/main.tar.gz",
-        install_source="github_release_or_archive",
-    )
+    result = _pinned_source_result(tmp_path)
     result["source_status"] = {"github_repository": "reachable", "last_checked": "2026-07-29T00:00:00+00:00"}
     result["_source_refresh_in_progress"] = True
     calls: list[str] = []

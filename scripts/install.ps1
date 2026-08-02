@@ -3,7 +3,14 @@ Param(
     [switch]$Json,
     [ValidateSet("windows_powershell", "windows_cmd")]
     [string]$Platform = "windows_powershell",
-    [string]$TargetVersion = "0.1.0"
+    [string]$Version,
+    [ValidateSet("stable", "prerelease", "main")]
+    [string]$Channel,
+    [string]$Ref,
+    [switch]$Local,
+    [string]$TargetVersion,
+    [string]$ReleaseTag,
+    [string]$SourceCommit
 )
 
 # M32 Bridge Windows user-local installer surface.
@@ -31,11 +38,15 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $script:RuntimeBootstrapSucceeded = $false
 $script:UvBin = $null
+$script:ArchivePath = $null
+$script:ManifestPath = $null
+$script:BootstrapPlanPath = $null
 $env:M32_POWERSHELL_VERSION = $PSVersionTable.PSVersion.ToString()
 # Keep these values in parity with src/m32_bridge/installer/runtime_manager.py.
 $ApprovedPythonMinor = "3.13"
 $ProjectPythonRange = ">=3.11,<3.14"
 $UvInstallUrlWindows = "https://astral.sh/uv/install.ps1"
+$SecureBootstrapPayload = "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"
 
 function Show-M32Help {
     @"
@@ -59,7 +70,7 @@ Targets:
     retain saved config by default
 
 Recommended trust workflow:
-  1. Download scripts/install.ps1 using irm / Invoke-RestMethod.
+  1. Download https://github.com/DXBMARK/m32-bridge/releases/latest/download/install.ps1 using irm / Invoke-RestMethod.
   2. Inspect the script.
   3. Run it locally from PowerShell.
   4. Copy MCP snippets manually only; this script writes no IDE or MCP client config.
@@ -75,7 +86,22 @@ Options:
   -DryRun
   -Json
   -Platform windows_powershell|windows_cmd
-  -TargetVersion <version>
+  -Version vX.Y.Z
+  -Channel stable|prerelease|main
+  -Ref <full-40-hex-sha>
+  -Local
+
+Unified install methods:
+  DEFAULT             pwsh -File .\install.ps1
+  SPECIFIC VERSION    pwsh -File .\install.ps1 -Version v1.2.3
+  PRERELEASE          pwsh -File .\install.ps1 -Channel prerelease
+  DEVELOPMENT MAIN    pwsh -File .\install.ps1 -Channel main
+  IMMUTABLE COMMIT    pwsh -File .\install.ps1 -Ref FULL_40_HEX_SHA
+  LOCAL DEVELOPMENT   pwsh -File .\scripts\install.ps1 -Local
+
+The customer default is the latest published stable GitHub Release. The
+installer verifies tag, commit, manifest, staged project version, and checksum.
+No administrator access is used and system Python is unchanged.
 
 Bootstrap commands:
   /status /help /contact /clear /exit
@@ -406,14 +432,40 @@ if ([string]::IsNullOrEmpty($ScriptPath)) {
     $RepoRoot = Split-Path -Parent (Split-Path -Parent $ScriptPath)
 }
 
-$SourceRef = if ([string]::IsNullOrEmpty($env:M32_INSTALL_SOURCE_REF)) { "main" } else { $env:M32_INSTALL_SOURCE_REF }
-$DefaultSourceUrl = "https://github.com/DXBMARK/m32-bridge/archive/refs/heads/main.zip"
-$SourceUrl = if ([string]::IsNullOrEmpty($env:M32_INSTALL_SOURCE_URL)) { $DefaultSourceUrl } else { $env:M32_INSTALL_SOURCE_URL }
-$SourceKind = "local_checkout"
+$Version = if ($PSBoundParameters.ContainsKey("Version")) { $Version } else { $env:M32_INSTALL_VERSION }
+$Channel = if ($PSBoundParameters.ContainsKey("Channel")) { $Channel } else { $env:M32_INSTALL_CHANNEL }
+$Ref = if ($PSBoundParameters.ContainsKey("Ref")) { $Ref } else { $env:M32_INSTALL_REF }
+$LocalRequested = $Local.IsPresent -or $env:M32_INSTALL_LOCAL -in @("1", "true", "yes", "on")
+$TargetVersion = if ($PSBoundParameters.ContainsKey("TargetVersion")) { $TargetVersion } else { $env:M32_INSTALL_APPLICATION_VERSION }
+$ReleaseTag = if ($PSBoundParameters.ContainsKey("ReleaseTag")) { $ReleaseTag } else { $env:M32_INSTALL_RELEASE_TAG }
+$SourceCommit = if ($PSBoundParameters.ContainsKey("SourceCommit")) { $SourceCommit } else { $env:M32_INSTALL_SOURCE_COMMIT }
+$SourceRef = $env:M32_INSTALL_SOURCE_REF
+$SourceUrl = $env:M32_INSTALL_SOURCE_URL
+$selectorCount = @($Version, $Channel, $Ref, $(if ($LocalRequested) { "local" } else { $null })) | Where-Object { -not [string]::IsNullOrEmpty($_) }
+if ($selectorCount.Count -gt 1) { throw "INSTALL_SELECTION_CONFLICT: use only one of -Version, -Channel, -Ref, or -Local." }
+$CheckoutAvailable = (Test-Path (Join-Path $RepoRoot "src/m32_bridge")) -and (Test-Path (Join-Path $RepoRoot "pyproject.toml"))
+if (-not [string]::IsNullOrEmpty($Version)) {
+    if ($Version -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$') {
+        throw "RELEASE_TAG_INVALID: -Version requires strict v-prefixed SemVer."
+    }
+    $SourceKind = "github_release_asset"
+} elseif (-not [string]::IsNullOrEmpty($Ref)) {
+    if ($Ref -notmatch '^[0-9A-Fa-f]{40}$') { throw "RELEASE_SOURCE_COMMIT_INVALID: -Ref requires one full 40-character hexadecimal SHA." }
+    $SourceKind = "github_commit_archive"
+} elseif ($LocalRequested) {
+    $SourceKind = "local_checkout"
+} elseif (-not [string]::IsNullOrEmpty($Channel)) {
+    $SourceKind = if ($Channel -eq "main") { "github_main" } else { "github_release_asset" }
+} elseif ($CheckoutAvailable) {
+    $SourceKind = "local_checkout"
+    $LocalRequested = $true
+} else {
+    $SourceKind = "github_release_asset"
+    $Channel = "stable"
+}
 $BootstrapSourceRoot = $null
-if (-not (Test-Path (Join-Path $RepoRoot "src/m32_bridge")) -or -not (Test-Path (Join-Path $RepoRoot "pyproject.toml"))) {
-    $SourceKind = "github_release_or_archive"
-    $RepoRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("m32-bridge-bootstrap-" + $PID)
+if ($SourceKind -ne "local_checkout") {
+    $RepoRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("m32-bridge-bootstrap-" + [Guid]::NewGuid().ToString("N"))
     $BootstrapSourceRoot = $RepoRoot
 }
 
@@ -464,8 +516,9 @@ function Get-MissingUvPayload {
         osc_writes_sent = 0
         hardware_verified = $false
         production_live_ready = $false
-        version = $TargetVersion
-        target_version = $TargetVersion
+        application_version = $null
+        application_version_source = "not_resolved"
+        requested_selection = if ($Version) { $Version } elseif ($Channel) { $Channel } elseif ($Ref) { "commit" } else { "local" }
         install_source = $SourceKind
         source_url = $SourceUrl
         source_ref = $SourceRef
@@ -478,19 +531,91 @@ function Get-MissingUvPayload {
     }
 }
 
+function Write-SecureBootstrapHelper([string]$HelperPath) {
+    $previousPayload = $env:M32_SECURE_BOOTSTRAP_PAYLOAD
+    try {
+        $env:M32_SECURE_BOOTSTRAP_PAYLOAD = $SecureBootstrapPayload
+        $decode = 'import base64,gzip,os,pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(gzip.decompress(base64.b64decode(os.environ["M32_SECURE_BOOTSTRAP_PAYLOAD"])))'
+        & $script:UvBin run --managed-python --python $ApprovedPythonMinor --no-build --no-project python -c $decode $HelperPath
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $HelperPath)) {
+            throw "BOOTSTRAP_HELPER_INVALID: secure bootstrap helper could not be materialized."
+        }
+    } finally {
+        if ($null -eq $previousPayload) {
+            Remove-Item Env:M32_SECURE_BOOTSTRAP_PAYLOAD -ErrorAction SilentlyContinue
+        } else {
+            $env:M32_SECURE_BOOTSTRAP_PAYLOAD = $previousPayload
+        }
+    }
+}
+
 function Initialize-RemoteSource {
     New-Item -ItemType Directory -Path $RepoRoot -Force | Out-Null
-    $archive = Join-Path $RepoRoot "source.zip"
-    Invoke-RestMethod -Uri $SourceUrl -OutFile $archive
-    Expand-Archive -Path $archive -DestinationPath $RepoRoot -Force
-    $project = Get-ChildItem -Path $RepoRoot -Directory | Where-Object {
-        (Test-Path (Join-Path $_.FullName "src/m32_bridge")) -and
-        (Test-Path (Join-Path $_.FullName "pyproject.toml"))
-    } | Select-Object -First 1
-    if ($null -eq $project) {
-        throw "Downloaded source archive did not contain expected m32_bridge project files."
+    $helper = Join-Path $RepoRoot "secure_bootstrap.py"
+    $script:BootstrapPlanPath = Join-Path $RepoRoot "bootstrap-plan.json"
+    Write-SecureBootstrapHelper $helper
+
+    $bootstrapArgs = @(
+        $helper,
+        "--surface", "windows",
+        "--output-root", $RepoRoot
+    )
+    if (-not [string]::IsNullOrEmpty($Version)) {
+        $bootstrapArgs += @("--version", $Version)
+    } elseif (-not [string]::IsNullOrEmpty($Ref)) {
+        $bootstrapArgs += @("--ref", $Ref)
+    } else {
+        $bootstrapArgs += @("--channel", $(if ([string]::IsNullOrEmpty($Channel)) { "stable" } else { $Channel }))
     }
-    $script:RepoRoot = $project.FullName
+    if ($DryRun) { $bootstrapArgs += "--dry-run" }
+
+    $bootstrapOutput = @(& $script:UvBin run --managed-python --python $ApprovedPythonMinor --no-build --no-project python @bootstrapArgs)
+    $bootstrapExitCode = $LASTEXITCODE
+    $bootstrapText = ($bootstrapOutput -join [Environment]::NewLine) + [Environment]::NewLine
+    [System.IO.File]::WriteAllText(
+        $script:BootstrapPlanPath,
+        $bootstrapText,
+        (New-Object System.Text.UTF8Encoding($false))
+    )
+    if ($bootstrapExitCode -ne 0) {
+        if (Test-Path -LiteralPath $script:BootstrapPlanPath) {
+            Get-Content -LiteralPath $script:BootstrapPlanPath -Raw | Write-Error
+        }
+        throw "REMOTE_BOOTSTRAP_FAILED: secure source preflight failed."
+    }
+
+    $plan = Get-Content -LiteralPath $script:BootstrapPlanPath -Raw | ConvertFrom-Json
+    $script:SourceCommit = [string]$plan.source_commit
+    $script:SourceRef = [string]$plan.source_ref
+    $script:SourceUrl = [string]$plan.source_archive_url
+    $script:ReleaseTag = if ($null -eq $plan.release_tag) { $null } else { [string]$plan.release_tag }
+
+    if ($DryRun) {
+        if ($Json) {
+            Get-Content -LiteralPath $script:BootstrapPlanPath -Raw
+        } else {
+            "M32 Bridge remote dry-run"
+            foreach ($name in @("status", "requested_selection", "install_source", "release_tag", "source_commit", "application_version", "source_archive_url", "archive_checksum_status", "identity_status")) {
+                "${name}: $($plan.$name)"
+            }
+            "admin_required=false"
+            "system_python_modified=false"
+            "network_scan=not_run"
+            "console_probe=not_run"
+            "osc_writes_sent=0"
+        }
+        return $false
+    }
+
+    $verifiedRoot = [string]$plan.source_root
+    if ([string]::IsNullOrWhiteSpace($verifiedRoot) -or
+        -not (Test-Path -LiteralPath (Join-Path $verifiedRoot "pyproject.toml")) -or
+        -not (Test-Path -LiteralPath (Join-Path $verifiedRoot "uv.lock")) -or
+        -not (Test-Path -LiteralPath (Join-Path $verifiedRoot "src/m32_bridge"))) {
+        throw "BOOTSTRAP_PLAN_INVALID: verified source root is incomplete."
+    }
+    $script:RepoRoot = $verifiedRoot
+    return $true
 }
 
 $existingPythonPath = $env:PYTHONPATH
@@ -503,12 +628,13 @@ if ([string]::IsNullOrEmpty($existingPythonPath)) {
 $runtimeArgs = @(
     "-m", "m32_bridge.installer.script_runtime",
     "--surface", "windows",
-    "--platform", $Platform,
-    "--target-version", $TargetVersion,
-    "--install-source", $SourceKind,
-    "--source-url", $SourceUrl,
-    "--source-ref", $SourceRef
+    "--platform", $Platform
 )
+if (-not [string]::IsNullOrEmpty($Version)) { $runtimeArgs += @("--version", $Version) }
+if (-not [string]::IsNullOrEmpty($Channel)) { $runtimeArgs += @("--channel", $Channel) }
+if (-not [string]::IsNullOrEmpty($Ref)) { $runtimeArgs += @("--ref", $Ref) }
+if ($LocalRequested) { $runtimeArgs += "--local" }
+if (-not [string]::IsNullOrEmpty($TargetVersion)) { $runtimeArgs += @("--target-version", $TargetVersion) }
 
 if ($DryRun) {
     $runtimeArgs += "--dry-run"
@@ -539,13 +665,16 @@ if ($null -eq $uvCommand -and -not $Json -and -not $DryRun -and (Test-Interactiv
 if ($null -ne $uvCommand) {
     try {
     if ($SourceKind -ne "local_checkout") {
-        Initialize-RemoteSource
+        $continueRemote = Initialize-RemoteSource
+        if (-not $continueRemote) { return }
         if ([string]::IsNullOrEmpty($existingPythonPath)) {
             $env:PYTHONPATH = Join-Path $RepoRoot "src"
         } else {
             $env:PYTHONPATH = "$(Join-Path $RepoRoot "src");$existingPythonPath"
         }
     }
+    $runtimeArgs += @("--source-root", $RepoRoot)
+    if (-not [string]::IsNullOrEmpty($script:BootstrapPlanPath)) { $runtimeArgs += @("--bootstrap-plan", $script:BootstrapPlanPath) }
     if (-not (Test-Path (Join-Path $RepoRoot "uv.lock"))) {
         throw "uv.lock is required for reproducible frozen runtime execution. Refusing unfrozen install."
     }

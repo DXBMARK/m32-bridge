@@ -27,6 +27,7 @@ MANAGED_PYTHON_POLICY: dict[str, Any] = {
     "default_python_aliases_installed": False,
     "admin_required": False,
 }
+UV_BOOTSTRAP_USER_AGENT = "X32-Bridge-MCP-Installer"
 UV_INSTALL_URLS = {
     "posix": "https://astral.sh/uv/install.sh",
     "windows": "https://astral.sh/uv/install.ps1",
@@ -180,7 +181,7 @@ def local_runtime_diagnostics(
             "launcher_executable": bool(launcher and launcher.exists() and os.access(launcher, os.X_OK)),
             "path_visibility": bool(launcher and str(launcher.parent) in env.get("PATH", "").split(os.pathsep)),
             "console_probe": "not_run",
-            "network_scan": False,
+            "network_scan": "not_run",
             "osc_writes_sent": 0,
             "hardware_verified": False,
             "production_live_ready": False,
@@ -322,7 +323,7 @@ def bootstrap_uv_and_python(
 
 
 def _download_to_file(url: str, target: Path) -> None:
-    request = urllib.request.Request(url, headers={"User-Agent": "M32-Bridge-Installer/0.1"})
+    request = urllib.request.Request(url, headers={"User-Agent": UV_BOOTSTRAP_USER_AGENT})
     with urllib.request.urlopen(request, timeout=15) as response:
         status = getattr(response, "status", 200)
         if status < 200 or status >= 300:

@@ -12,14 +12,22 @@ import textwrap
 import urllib.error
 import urllib.parse
 import urllib.request
-from importlib.metadata import PackageNotFoundError, version as package_version
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, TextIO
-import tomllib
 
 from m32_bridge.runtime_preconditions import evaluate_console_precondition
+from m32_bridge.installer.application_version import application_version
+from m32_bridge.installer.display_safety import sanitize_display_value
+from m32_bridge.installer.runtime_status import (
+    RUNTIME_COMMAND_REGISTRY,
+    RUNTIME_PICKER_ORDER,
+    build_runtime_doctor,
+    build_runtime_health,
+    build_runtime_status,
+    record_console_result,
+)
 
 
 BG_HEX = "#243947"
@@ -45,6 +53,7 @@ POWERED_BY = "Powered by DXBMARK LLC"
 CONTACT_URL = "https://www.dxbmark.com"
 CONTACT_EMAIL = "support@dxbmark.com"
 CONTACT_PHONE = "+971505121583"
+INSTALLER_SOURCE_USER_AGENT = "X32-Bridge-MCP-Installer"
 
 DXBMARK_ASCII_LOGO = r"""
 #  ______  ______  __  __    _    ____  _  __
@@ -82,7 +91,7 @@ COMMAND_REGISTRY = {
     "/verify-device": _command("Verify the configured endpoint; no network scan", "network read-only", "m32-bridge detect-device", requires_console_config=True, safe_to_retry_after_setup=True),
     "/doctor-runtime": _command("Diagnose local runtime issues", "local-only", "m32-bridge doctor-runtime"),
     "/mcp-config": _command("Generate safe MCP client configuration and setup guidance", "local-only", "m32-bridge mcp-config"),
-    "/status": _command("Show runtime status", "local-only", "m32-bridge health"),
+    "/status": _command("Show runtime status", "local-only", "m32-bridge status"),
     "/contact": _command("Show product information, version, publisher and support", "local-only", "runtime-only"),
     "/help": _command("Show the responsive command guide", "local-only", "m32-bridge --help"),
     "/clear": _command("Clear and redraw the current screen", "local-only", "runtime-only"),
@@ -95,6 +104,8 @@ SHELL_ALIASES = {
     "m32-bridge detect-device": "/verify-device",
     "m32-bridge doctor-runtime": "/doctor-runtime",
     "m32-bridge mcp-config": "/mcp-config",
+    "m32-bridge status": "/status",
+    "m32-bridge status --refresh": "/status refresh",
     "help": "/help",
     "status": "/status",
     "clear": "/clear",
@@ -124,7 +135,15 @@ SLASH_COMMANDS = [
     }
     for command in _PICKER_ORDER
 ]
-PANEL_VIEWS = frozenset({"help", "contact", "status", "panel", "action", "setup", "mcp"})
+RUNTIME_SLASH_COMMANDS = [
+    {
+        "cmd": command,
+        "desc": RUNTIME_COMMAND_REGISTRY[command].description,
+        "category": "Action" if RUNTIME_COMMAND_REGISTRY[command].view not in {"help", "contact", "main", "exit"} else "Utility",
+    }
+    for command in RUNTIME_PICKER_ORDER
+]
+PANEL_VIEWS = frozenset({"help", "contact", "status", "health", "get_info", "verify_device", "doctor", "panel", "action", "setup", "mcp"})
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
@@ -150,19 +169,6 @@ def enable_windows_ansi(*, stream: TextIO | None = None) -> bool:
     except Exception:
         os.system("")
         return False
-
-
-def application_version() -> str:
-    try:
-        return package_version(PACKAGE_NAME)
-    except PackageNotFoundError:
-        pyproject = Path(__file__).resolve().parents[3] / "pyproject.toml"
-        try:
-            metadata = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-            value = metadata.get("project", {}).get("version")
-            return str(value) if value else "0.1.0-dev"
-        except (OSError, tomllib.TOMLDecodeError):
-            return "0.1.0-dev"
 
 
 class CRLFStdout:
@@ -278,6 +284,7 @@ HELP_SECTIONS = {
     "POWERED BY",
     "MCP CLIENT SETUP",
     "INSTALLATION",
+    "INSTALL SELECTION",
     "CONFIGURATION PRINCIPLE",
     "CLIENT COMPATIBILITY",
     "CLAUDE DESKTOP",
@@ -521,6 +528,8 @@ def render_frame(
     colors = Colors(color)
     content_width = max(width - 1, 20)
     tty_mode = str(result.get("tty_mode") or "installer")
+    if tty_mode == "runtime" and not isinstance(result.get("runtime_status_snapshot", {}).get("application"), dict):
+        build_runtime_status(result, refresh=False)
     header_raw = _header_lines(colors, width=width, tty_mode=tty_mode)
     max_header = max(1, min(len(header_raw), max(height - 3, 1)))
     header = [pad_ansi_line(line, content_width, color=color) for line in header_raw[:max_header]]
@@ -532,7 +541,8 @@ def render_frame(
     if input_buffer.startswith("/"):
         command_height_for_picker = 1 if body_height else 0
         picker_available = max(body_height - command_height_for_picker, 1)
-        picker_text = _render_picker_overlay(input_buffer, picker or SlashCommandPicker(SLASH_COMMANDS), colors, picker_available)
+        available_commands = RUNTIME_SLASH_COMMANDS if tty_mode == "runtime" else SLASH_COMMANDS
+        picker_text = _render_picker_overlay(input_buffer, picker or SlashCommandPicker(available_commands), colors, picker_available)
         overlay_lines = picker_text.splitlines() if picker_text else ["No matching commands"]
         view = "picker"
     elif panel_lines:
@@ -542,7 +552,7 @@ def render_frame(
         content_width,
         color=color,
     )
-    main_rows = [render_semantic_row(row, colors) for row in _body_rows(surface, result, dry_run=dry_run)]
+    main_rows = [render_semantic_row(row, colors) for row in _body_rows(surface, result, dry_run=dry_run, width=width, height=height)]
     command_height = 1 if body_height and (input_buffer or overlay_lines or panel_lines) else 0
     if panel_lines and view in PANEL_VIEWS:
         overlay_capacity = max(body_height - command_height, 0)
@@ -572,12 +582,12 @@ def render_frame(
     return header, body, footer
 
 
-def _picker_visible_limit(body_height: int) -> int:
-    return max(3, min(7, max(body_height - 6, 3), len(SLASH_COMMANDS)))
+def _picker_visible_limit(body_height: int, command_count: int) -> int:
+    return max(3, min(7, max(body_height - 6, 3), command_count))
 
 
 def _render_picker_overlay(query: str, picker: SlashCommandPicker, colors: Colors, available_rows: int) -> str:
-    picker.visible_limit = min(_picker_visible_limit(available_rows + 1), len(picker.filtered(query)) or len(SLASH_COMMANDS))
+    picker.visible_limit = min(_picker_visible_limit(available_rows + 1, len(picker.commands)), len(picker.filtered(query)) or len(picker.commands))
     text = picker.render(query, colors)
     while text and len(text.splitlines()) > available_rows and picker.visible_limit > 1:
         picker.visible_limit -= 1
@@ -620,11 +630,13 @@ def render_semantic_row(row: TTYRow, colors: Colors) -> str:
     if row.kind == "section":
         return f"{colors.PRIMARY}{colors.BOLD}{row.text}{colors.RESET_BG}"
     if row.kind == "field":
-        if row.label in _EQUALS_FIELDS:
-            return f"  {colors.MUTED}{row.label}{colors.RESET_BG}{colors.BORDER}={colors.RESET_BG}{_style_value(str(row.value), row.value_style, colors)}"
-        return f"  {colors.MUTED}{row.label:<28}{colors.RESET_BG}{colors.BORDER}:{colors.RESET_BG} {_style_value(str(row.value), row.value_style, colors)}"
+        safe_label = sanitize_display_value(row.label, max_length=64)
+        safe_value = sanitize_display_value(row.value)
+        if safe_label in _EQUALS_FIELDS:
+            return f"  {colors.MUTED}{safe_label}{colors.RESET_BG}{colors.BORDER}={colors.RESET_BG}{_style_value(safe_value, row.value_style, colors)}"
+        return f"  {colors.MUTED}{safe_label:<28}{colors.RESET_BG}{colors.BORDER}:{colors.RESET_BG} {_style_value(safe_value, row.value_style, colors)}"
     if row.kind == "text":
-        return f"  {colors.TEXT}{row.text}{colors.RESET_BG}"
+        return f"  {colors.TEXT}{sanitize_display_value(row.text)}{colors.RESET_BG}"
     if row.kind == "command":
         return f"  {colors.PRIMARY}{row.text}{colors.RESET_BG}"
     if row.kind == "warning":
@@ -787,8 +799,20 @@ def installer_help_text(*, color: bool = False, width: int = 80) -> str:
         "  --dry-run",
         "  --json",
         "  --platform <name>",
-        "  --target-version <version>",
+        "  --version <vX.Y.Z>",
+        "  --channel <stable|prerelease|main>",
+        "  --ref <FULL_40_HEX_SHA>",
+        "  --local",
         "  JSON mode is machine-readable and never prompts or installs.",
+        "",
+        "INSTALL SELECTION",
+        "-" * 60,
+        "  Standalone default : latest stable official Release",
+        "  Checkout default   : local checkout",
+        "  Specific Release   : --version vX.Y.Z",
+        "  Prerelease         : --channel prerelease",
+        "  Development main   : --channel main (explicit only)",
+        "  Immutable commit   : --ref FULL_40_HEX_SHA",
         "",
         "SYNTAX NOTES",
         "-" * 60,
@@ -935,6 +959,145 @@ def parse_installer_command(command: str) -> str | None:
     return SHELL_ALIASES.get(lowered)
 
 
+def parse_runtime_command(command: str) -> str | None:
+    normalized = " ".join(command.strip().split())
+    lowered = normalized.lower()
+    if not lowered:
+        return ""
+    if any(token in normalized for token in ("|", ">", "<", ";", "&&", "||", "$(", "`", "\n", "\r")):
+        return None
+    if lowered == "/":
+        return "/"
+    if lowered in RUNTIME_COMMAND_REGISTRY:
+        return lowered
+    aliases = {
+        "help": "/help",
+        "m32-bridge --help": "/help",
+        "status": "/status",
+        "status refresh": "/status refresh",
+        "m32-bridge status": "/status",
+        "m32-bridge status --refresh": "/status refresh",
+        "m32-bridge health": "/health",
+        "m32-bridge setup": "/setup",
+        "m32-bridge get-info": "/get-info",
+        "m32-bridge detect-device": "/verify-device",
+        "m32-bridge doctor-runtime": "/doctor-runtime",
+        "m32-bridge mcp-config": "/mcp-config",
+        "clear": "/clear",
+        "contact": "/contact",
+        "q": "/exit",
+        "quit": "/exit",
+        "exit": "/exit",
+    }
+    return aliases.get(lowered)
+
+
+def runtime_handler_ids() -> frozenset[str]:
+    return frozenset(_runtime_handlers())
+
+
+def dispatch_runtime_command(
+    command: str,
+    result: dict[str, Any],
+    *,
+    color: bool = False,
+    input_func: Callable[[str], str] | None = None,
+    width: int | None = None,
+    handlers: dict[str, Callable[..., tuple[str, bool]]] | None = None,
+) -> tuple[str, bool]:
+    action = parse_runtime_command(command)
+    if action is None:
+        return "Unknown command. Type / to view allowed commands.", False
+    if action == "":
+        return "", False
+    if action == "/":
+        return render_runtime_command_picker("/", color=color), False
+    spec = RUNTIME_COMMAND_REGISTRY.get(action)
+    if spec is None:
+        return "Unknown command. Type / to view allowed commands.", False
+    handler = (handlers or _runtime_handlers()).get(spec.handler_id)
+    if handler is None:
+        return render_runtime_command_failure("COMMAND_FAILED", log_path=None, color=color), False
+    result.setdefault("_runtime_handler_trace", []).append(spec.handler_id)
+    return handler(result, color=color, input_func=input_func, width=width)
+
+
+def _runtime_handlers() -> dict[str, Callable[..., tuple[str, bool]]]:
+    return {
+        "runtime_help": _runtime_handle_help,
+        "runtime_status": _runtime_handle_status,
+        "runtime_status_refresh": _runtime_handle_status_refresh,
+        "runtime_health": _runtime_handle_health,
+        "runtime_setup": _runtime_handle_setup,
+        "runtime_get_info": _runtime_handle_get_info,
+        "runtime_verify_device": _runtime_handle_verify_device,
+        "runtime_doctor": _runtime_handle_doctor,
+        "runtime_mcp_config": _runtime_handle_mcp_config,
+        "runtime_contact": _runtime_handle_contact,
+        "runtime_clear": _runtime_handle_clear,
+        "runtime_exit": _runtime_handle_exit,
+    }
+
+
+def _runtime_handle_help(result: dict[str, Any], **kwargs: Any) -> tuple[str, bool]:
+    return runtime_help_text(color=bool(kwargs.get("color"))), False
+
+
+def _runtime_handle_status(result: dict[str, Any], **kwargs: Any) -> tuple[str, bool]:
+    payload = build_runtime_status(result, refresh=False)
+    return render_runtime_status_panel(payload, color=bool(kwargs.get("color"))), False
+
+
+def _runtime_handle_status_refresh(result: dict[str, Any], **kwargs: Any) -> tuple[str, bool]:
+    payload = build_runtime_status(result, refresh=True)
+    return render_runtime_status_panel(payload, color=bool(kwargs.get("color"))), False
+
+
+def _runtime_handle_health(result: dict[str, Any], **kwargs: Any) -> tuple[str, bool]:
+    payload = build_runtime_health(result)
+    return render_runtime_health_panel(payload, color=bool(kwargs.get("color"))), False
+
+
+def _runtime_handle_setup(result: dict[str, Any], **kwargs: Any) -> tuple[str, bool]:
+    input_func = kwargs.get("input_func")
+    if input_func is None:
+        return _setup_view_text(), False
+    return _execute_setup(input_func, result, color=bool(kwargs.get("color"))), False
+
+
+def _runtime_handle_get_info(result: dict[str, Any], **kwargs: Any) -> tuple[str, bool]:
+    return _execute_console_read("/get-info", result, color=bool(kwargs.get("color"))), False
+
+
+def _runtime_handle_verify_device(result: dict[str, Any], **kwargs: Any) -> tuple[str, bool]:
+    return _execute_console_read("/verify-device", result, color=bool(kwargs.get("color"))), False
+
+
+def _runtime_handle_doctor(result: dict[str, Any], **kwargs: Any) -> tuple[str, bool]:
+    return render_doctor_runtime_panel(build_runtime_doctor(result), color=bool(kwargs.get("color"))), False
+
+
+def _runtime_handle_mcp_config(result: dict[str, Any], **kwargs: Any) -> tuple[str, bool]:
+    from m32_bridge.installer.mcp_guidance import render_mcp_guidance, render_mcp_guidance_text
+
+    payload = render_mcp_guidance(environ=dict(os.environ), version=application_version())
+    payload["network_scan"] = "not_run"
+    return _style_panel_text(render_mcp_guidance_text(payload, width=kwargs.get("width") or terminal_size()[0]), color=bool(kwargs.get("color"))), False
+
+
+def _runtime_handle_contact(result: dict[str, Any], **kwargs: Any) -> tuple[str, bool]:
+    return runtime_contact_text(result=result, color=bool(kwargs.get("color"))), False
+
+
+def _runtime_handle_clear(result: dict[str, Any], **kwargs: Any) -> tuple[str, bool]:
+    surface = "windows" if str(result.get("platform", "")).startswith("windows") else "posix"
+    return render_tty_installer(surface, result, dry_run=False, color=bool(kwargs.get("color"))), False
+
+
+def _runtime_handle_exit(result: dict[str, Any], **kwargs: Any) -> tuple[str, bool]:
+    return "Runtime Console exited.", True
+
+
 def execute_installer_command(
     command: str,
     result: dict[str, Any],
@@ -975,6 +1138,14 @@ def _execute_command_impl(
     input_func: Callable[[str], str] | None = None,
     width: int | None = None,
 ) -> tuple[str, bool]:
+    if result.get("tty_mode") == "runtime":
+        return dispatch_runtime_command(
+            command,
+            result,
+            color=color,
+            input_func=input_func,
+            width=width,
+        )
     action = parse_installer_command(command)
     if action is None:
         return "Unknown command. Type / to view allowed commands.", False
@@ -988,7 +1159,7 @@ def _execute_command_impl(
         return installer_help_text(color=color, width=width or terminal_size()[0]), False
     if action == "/contact":
         if result.get("tty_mode") == "runtime":
-            return runtime_contact_text(color=color), False
+            return runtime_contact_text(result=result, color=color), False
         return installer_contact_text(color=color, width=width), False
     if action == "/mcp-config":
         from m32_bridge.installer.mcp_guidance import render_mcp_guidance, render_mcp_guidance_text
@@ -1060,10 +1231,20 @@ def refresh_source_status(
         }
     result["_source_refresh_in_progress"] = True
     check = checker or _bounded_url_status
-    source_url = str(result.get("source_url") or "")
-    github_url = "https://github.com/"
-    raw_url = _raw_installer_url_for_result(result)
-    archive_url = _source_archive_url_for_result(result)
+    refresh_urls = _source_refresh_urls_for_result(result)
+    if refresh_urls is None:
+        statuses = {
+            "network_https_route": "not_checked",
+            "dns": "not_checked",
+            "github_repository": "not_checked",
+            "raw_installer": "not_checked",
+            "source_archive": "not_checked",
+            "last_checked": "not_run_source_identity_unavailable",
+        }
+        result["source_status"] = statuses
+        result["_source_refresh_in_progress"] = False
+        return statuses
+    raw_url, archive_url = refresh_urls
     try:
         network_https_route = check("https://github.com/", timeout)
         github_repository = check("https://github.com/DXBMARK/m32-bridge", timeout)
@@ -1127,9 +1308,12 @@ def _execute_setup_payload(
                 "message": "Setup cancelled. Existing configuration was not changed." if action == "CANCEL" else "Type SAVE to store this configuration or CANCEL to discard it.",
                 "configured_host": host,
                 "configured_port": port,
-                "attempted_path": None,
+                "attempted_path": "not_attempted",
                 "intended_path": "/info",
-                "probe_not_run": True,
+                "verification_attempted": False,
+                "legacy_installer_probe_not_run": result.get("tty_mode") != "runtime",
+                "console_probe": "not_run",
+                "network_scan": "not_run",
                 "config_not_written": True,
                 "scan_attempted": False,
                 "osc_writes_sent": 0,
@@ -1153,9 +1337,22 @@ def _execute_setup_payload(
         confirm_save=True,
         config_path=Path(resolved_config_path),
     )
+    payload["configured_host"] = host
+    payload["configured_port"] = port
+    payload["config_path"] = str(resolved_config_path)
+    payload["intended_target_type"] = canonical_target_type(target_type)
     payload["scan_attempted"] = False
+    payload["network_scan"] = "not_run"
     payload["osc_writes_sent"] = 0
-    result["console_connection_status"] = "reachable" if payload.get("connected") else "unreachable"
+    payload["verification_attempted"] = payload.get("attempted_path") == "/info"
+    payload["console_probe"] = "run" if payload["verification_attempted"] else "not_run"
+    payload["connection_state"] = "reachable" if payload.get("connected") else ("unreachable" if payload["verification_attempted"] else "not_checked")
+    payload["endpoint_verified"] = bool(payload.get("connected"))
+    if payload["verification_attempted"] and not payload.get("connected"):
+        payload["verification_status"] = _classify_runtime_payload_failure(payload)
+        payload["error_code"] = payload["verification_status"]
+    record_console_result(result, payload)
+    build_runtime_status(result, refresh=False)
     return render_setup_result_panel(payload, color=color)
 
 
@@ -1187,6 +1384,8 @@ def _execute_console_read(action: str, result: dict[str, Any], *, color: bool = 
     payload["configured_host"] = resolution.effective_host
     payload["configured_port"] = resolution.effective_port
     payload["scan_attempted"] = False
+    payload["network_scan"] = "not_run"
+    payload["console_probe"] = "run"
     payload["osc_writes_sent"] = 0
     payload["hardware_verified"] = bool(payload.get("hardware_verified") is True and payload.get("classification") == "HARDWARE_VERIFIED")
     payload["production_live_ready"] = False
@@ -1194,7 +1393,14 @@ def _execute_console_read(action: str, result: dict[str, Any], *, color: bool = 
         runtime_error = _classify_runtime_payload_failure(payload)
         payload["error_code"] = runtime_error
         payload["status"] = runtime_error
-    result["console_connection_status"] = "reachable" if payload.get("connected") else "unreachable"
+    payload["connection_state"] = "reachable" if payload.get("connected") else "unreachable"
+    payload["next_action"] = (
+        "none"
+        if payload.get("connected")
+        else "Check console power, configured IP, UDP port, and network route."
+    )
+    record_console_result(result, payload)
+    build_runtime_status(result, refresh=False)
     if action == "/get-info":
         return render_get_info_panel(payload, color=color)
     return render_verify_device_panel(payload, color=color)
@@ -1288,7 +1494,7 @@ def render_runtime_command_failure(error_code: str, *, log_path: Path | None, co
 
 
 def _local_runtime_payload(result: dict[str, Any]) -> dict[str, Any]:
-    from m32_bridge.installer.runtime_manager import local_runtime_diagnostics
+    from m32_bridge.installer.runtime_manager import local_runtime_diagnostics, platform_information
 
     return local_runtime_diagnostics(
         app_path=result.get("app_path"),
@@ -1318,9 +1524,18 @@ def runtime_help_text(*, color: bool = False) -> str:
         _section_title("COMMANDS", colors),
         _separator("-" * 60, colors),
     ]
-    for command in _PICKER_ORDER:
-        metadata = COMMAND_REGISTRY[command]
-        lines.append(f"  {colors.PRIMARY}{command:<16}{colors.RESET_BG} {colors.TEXT}{metadata['desc']}{colors.RESET_BG}")
+    for command in RUNTIME_PICKER_ORDER:
+        metadata = RUNTIME_COMMAND_REGISTRY[command]
+        lines.extend(
+            [
+                f"  {colors.PRIMARY}{command}{colors.RESET_BG}",
+                f"    Purpose : {metadata.description}",
+                f"    Network : {metadata.network_scope}",
+                f"    Setup   : {'required' if metadata.requires_console_config else 'not required'}",
+                f"    Writes  : {'may save runtime config' if not metadata.read_only else 'none'}",
+                f"    Shell   : {metadata.shell_equivalent}",
+            ]
+        )
     lines.extend(
         [
             "",
@@ -1335,14 +1550,15 @@ def runtime_help_text(*, color: bool = False) -> str:
     return "\n".join(lines)
 
 
-def runtime_contact_text(*, color: bool = False) -> str:
+def runtime_contact_text(*, result: dict[str, Any] | None = None, color: bool = False) -> str:
+    snapshot = build_runtime_status(result, refresh=False)
     return _panel(
-        "RUNTIME CONSOLE",
+        "CONTACT",
         [
-            ("PRODUCT", [("Name", PRODUCT_NAME, "normal"), ("Version", application_version(), "normal")]),
+            ("PRODUCT", [("Name", PRODUCT_NAME, "normal"), ("Version", snapshot["application"]["version"], "normal"), ("Publisher", "DXBMARK LLC", "normal")]),
             ("SUPPORT", [("Website", CONTACT_URL, "muted"), ("Email", CONTACT_EMAIL, "muted"), ("Phone / WhatsApp", CONTACT_PHONE, "muted")]),
         ],
-        notes=["Powered by DXBMARK LLC"],
+        notes=["Runtime support and product information."],
         color=color,
     )
 
@@ -1549,15 +1765,16 @@ def _panel(
     for section, rows in sections:
         lines.extend(["", _section_title(section, colors), _separator("-" * 60, colors)])
         for label, value, style in rows:
-            rendered = _human_value(value)
+            safe_label = sanitize_display_value(label, max_length=64)
+            rendered = sanitize_display_value(_human_value(value))
             if len(rendered) > 70 and "/" in rendered:
-                lines.append(f"  {colors.MUTED}{label:<26}{colors.RESET_BG}:")
+                lines.append(f"  {colors.MUTED}{safe_label:<26}{colors.RESET_BG}:")
                 lines.append(f"    {_style_value(rendered, style, colors)}")
             else:
-                lines.append(_status_field_colored(label, rendered, style, colors))
+                lines.append(_status_field_colored(safe_label, rendered, style, colors))
     if notes:
         lines.extend(["", _section_title("RESULT", colors), _separator("-" * 60, colors)])
-        lines.extend(f"  {_style_value(note, _semantic_style_for_value(note), colors)}" for note in notes)
+        lines.extend(f"  {_style_value(sanitize_display_value(note), _semantic_style_for_value(note), colors)}" for note in notes)
     lines.append("")
     lines.append(f"{colors.MUTED}End of {title.lower()}{colors.RESET_BG}")
     return "\n".join(lines)
@@ -1606,108 +1823,261 @@ def render_health_panel(payload: dict[str, Any], *, color: bool = False) -> str:
 
 
 def render_runtime_health_panel(result: dict[str, Any], *, color: bool = False) -> str:
-    precondition = evaluate_console_precondition()
-    configured = precondition.configured
-    invalid = precondition.state == "config_invalid"
-    runtime = result.get("runtime_info") if isinstance(result.get("runtime_info"), dict) else {}
-    result["console_configured"] = configured
-    result["console_precondition_state"] = precondition.state
-    result.setdefault("console_connection_status", "not_checked")
-    readiness_rows = [
-        ("Console configured", _bool(configured), "success" if configured else "warning"),
-        ("Console connection", "not_checked", "muted"),
-        ("Operational readiness", precondition.state, "error" if invalid else ("success" if configured else "warning")),
-        (
-            "Next action",
-            "none" if configured else ("Repair the saved configuration or run /setup" if invalid else "Run /setup to configure a console endpoint"),
-            "muted" if configured else ("error" if invalid else "command"),
-        ),
-    ]
-    if invalid:
-        readiness_rows.insert(0, ("Error code", "CONFIG_INVALID", "error"))
+    payload = result if "configuration_readiness" in result else build_runtime_health(result)
+    application = payload["application"]
+    readiness = payload["configuration_readiness"]
+    connection = payload["last_known_connection"]
+    safety = payload["safety"]
     return _panel(
         "HEALTH",
         [
             (
-                "APPLICATION RUNTIME",
+                "APPLICATION",
                 [
-                    ("Application runtime", "healthy", "success"),
-                    ("Managed Python", "ready", "success"),
-                    ("Python version", runtime.get("managed_python_version") or runtime.get("python_version") or "3.13", "success"),
-                    ("Frozen launcher", "enabled", "success"),
+                    ("Application runtime", application["application_runtime"], _semantic_style_for_value(application["application_runtime"])),
+                    ("Managed Python", application["managed_python"], _semantic_style_for_value(application["managed_python"])),
+                    ("Required imports", application["required_imports"], _semantic_style_for_value(application["required_imports"])),
+                    ("Frozen launcher", application["frozen_launcher"], "success"),
+                    ("App files", application["app_files"], _semantic_style_for_value(application["app_files"])),
+                    ("Launcher executable", _bool(application["launcher_executable"]), "success" if application["launcher_executable"] else "warning"),
                 ],
             ),
             (
-                "CONSOLE READINESS",
-                readiness_rows,
+                "CONFIGURATION READINESS",
+                [
+                    ("Configuration state", readiness["configuration_state"], _semantic_style_for_value(readiness["configuration_state"])),
+                    ("Console configured", _bool(readiness["console_configured"]), "success" if readiness["console_configured"] else "warning"),
+                    ("Operational state", readiness["operational_state"], _semantic_style_for_value(readiness["operational_state"])),
+                    ("Next action", readiness["next_action"], "muted" if readiness["next_action"] == "none" else "command"),
+                ],
+            ),
+            (
+                "LAST KNOWN CONNECTION",
+                [
+                    ("Connection state", connection["connection_state"], _semantic_style_for_value(connection["connection_state"])),
+                    ("Last check", connection["last_check_at"], "muted"),
+                ],
             ),
             (
                 "SAFETY",
                 [
-                    ("Attempted path", "not_attempted", "success"),
-                    ("Console probe", "not_run", "success"),
-                    ("Network scan", "not_run", "success"),
-                    ("OSC writes", 0, "success"),
+                    ("Attempted path", safety["attempted_path"], "success"),
+                    ("Console probe", safety["console_probe"], "success"),
+                    ("Console network scan", safety["network_scan"], "success"),
+                    ("OSC writes", safety["osc_writes_sent"], "success"),
                 ],
             ),
         ],
-        notes=[
-            "Application runtime is healthy. The saved console configuration is invalid."
-            if invalid
-            else "Application runtime is healthy. Console setup is tracked separately."
+        notes=["Local application health only. No source refresh or console probe was run."],
+        color=color,
+    )
+
+
+def render_runtime_status_panel(payload: dict[str, Any], *, color: bool = False) -> str:
+    application = payload["application"]
+    platform_info = payload["platform"]
+    runtime = payload["python_runtime"]
+    source = payload["installation_source"]
+    connectivity = payload["source_connectivity"]
+    config = payload["console_configuration"]
+    connection = payload["console_connection"]
+    safety = payload["safety"]
+    return _panel(
+        "RUNTIME STATUS",
+        [
+            (
+                "APPLICATION",
+                [
+                    ("Product", application["product"], "normal"),
+                    ("Version", application["version"], "normal"),
+                    ("Version source", application["version_source"], "normal"),
+                    ("Version status", application["version_status"], _semantic_style_for_value(application["version_status"])),
+                    ("App path", application["app_path"], "muted"),
+                    ("Launcher path", application["launcher_path"], "muted"),
+                    ("Runtime provenance", application["runtime_provenance"], "muted"),
+                    ("Install metadata", application["install_metadata_status"], _semantic_style_for_value(application["install_metadata_status"])),
+                ],
+            ),
+            (
+                "PLATFORM",
+                [
+                    ("OS", platform_info.get("os") or "unknown", "normal"),
+                    ("OS version", platform_info.get("version") or "unknown", "normal"),
+                    ("Kernel / build", platform_info.get("kernel_build") or "unknown", "muted"),
+                    ("Architecture", platform_info.get("architecture") or "unknown", "normal"),
+                    ("Shell", platform_info.get("shell") or "unknown", "normal"),
+                    ("Container", platform_info.get("container_hint") or "not_applicable", "muted"),
+                    ("WSL", platform_info.get("wsl") or "not_applicable", "muted"),
+                ],
+            ),
+            (
+                "PYTHON RUNTIME",
+                [
+                    ("uv detected", _bool(runtime["uv_detected"]), "success" if runtime["uv_detected"] else "warning"),
+                    ("uv version", runtime["uv_version"], "normal"),
+                    ("uv path", runtime["uv_path"], "muted"),
+                    ("Managed CPython", runtime["managed_python_version"], "normal"),
+                    ("Managed Python path", runtime["managed_python_path"], "muted"),
+                    ("Python source", runtime["python_source"], "normal"),
+                    ("Approved minor", runtime["approved_minor"], "success"),
+                    ("Project range", runtime["project_required_range"], "normal"),
+                    ("Frozen launcher", runtime["frozen_launcher"], "success"),
+                    ("System Python version", runtime["system_python_version"], "muted"),
+                    ("System Python path", runtime["system_python_path"], "muted"),
+                    ("System Python used", _bool(runtime["system_python_used"]), "success"),
+                    ("System Python modified", _bool(runtime["system_python_modified"]), "success"),
+                ],
+            ),
+            (
+                "INSTALLATION SOURCE",
+                [
+                    ("Application version", source["application_version"], "normal"),
+                    ("Application version source", source["application_version_source"], "normal"),
+                    ("Requested selection", source["requested_selection"], "normal"),
+                    ("Release channel", source["release_channel"], "normal"),
+                    ("Release tag", source["release_tag"], "normal"),
+                    ("Source commit", source["source_commit"], "normal"),
+                    ("Source ref", source["source_ref"], "normal"),
+                    ("Install source", source["install_source"], "normal"),
+                    ("Repository", source["repository_url"], "muted"),
+                    ("Installed at", source["installed_at"], "muted"),
+                    ("Raw bootstrap URL", source["raw_installer_url"], "muted"),
+                    ("Source archive URL", source["source_archive_url"], "muted"),
+                    ("Manifest status", source["manifest_status"], _semantic_style_for_value(source["manifest_status"])),
+                    ("Archive checksum", source["archive_checksum_status"], _semantic_style_for_value(source["archive_checksum_status"])),
+                    ("Last source check", source["last_source_check"], "muted"),
+                ],
+            ),
+            (
+                "SOURCE CONNECTIVITY",
+                [
+                    ("Network HTTPS route", connectivity["network_https_route"], _semantic_style_for_value(connectivity["network_https_route"])),
+                    ("DNS", connectivity["dns"], _semantic_style_for_value(connectivity["dns"])),
+                    ("GitHub repository", connectivity["github_repository"], _semantic_style_for_value(connectivity["github_repository"])),
+                    ("Raw bootstrap", connectivity["raw_installer"], _semantic_style_for_value(connectivity["raw_installer"])),
+                    ("Source archive", connectivity["source_archive"], _semantic_style_for_value(connectivity["source_archive"])),
+                ],
+            ),
+            (
+                "CONSOLE CONFIGURATION",
+                [
+                    ("Configuration state", config["configuration_state"], _semantic_style_for_value(config["configuration_state"])),
+                    ("Host", config["host"], "normal"),
+                    ("Port", config["port"], "normal"),
+                    ("Host source", render_config_source_name(config["host_source"]), "muted"),
+                    ("Port source", render_config_source_name(config["port_source"]), "muted"),
+                    ("Config file", _config_path_text(config["config_file"]), "muted"),
+                    ("Label", config["label"], "normal"),
+                    ("Intended target", display_target_type(config["intended_target"]), "normal"),
+                ],
+            ),
+            (
+                "CONSOLE CONNECTION",
+                [
+                    ("Connection state", connection["connection_state"], _semantic_style_for_value(connection["connection_state"])),
+                    ("Last attempted path", connection["last_attempted_path"], "normal"),
+                    ("Last error code", connection["last_error_code"], "muted"),
+                    ("Last latency", connection["last_latency_ms"], "muted"),
+                    ("Last check", connection["last_check_at"], "muted"),
+                ],
+            ),
+            (
+                "SAFETY",
+                [
+                    ("OSC writes sent", safety["osc_writes_sent"], "success"),
+                    ("/set", safety["set_command"], "success"),
+                    ("Console network scan", safety["network_scan"], "success"),
+                    ("Internet source refresh", safety["internet_source_refresh"], "success"),
+                    ("Console probe", safety["console_probe"], "success"),
+                    ("Admin elevation", safety["admin_elevation"], "success"),
+                    ("System Python modified", _bool(safety["system_python_modified"]), "success"),
+                    ("Hardware verified", _bool(safety["hardware_verified"]), "success"),
+                    ("Production ready", _bool(safety["production_live_ready"]), "success"),
+                ],
+            ),
         ],
+        notes=["Full local and cached Runtime status. Console connection is never probed by this command."],
         color=color,
     )
 
 
 def render_doctor_runtime_panel(payload: dict[str, Any], *, color: bool = False) -> str:
-    status_text = str(payload.get("status", "")).lower()
-    healthy = bool(
-        payload.get("healthy") is True
-        or payload.get("ok") is True
-        or status_text in {"ok", "healthy", "ready", "passed"}
-    )
+    if "runtime" not in payload or "installation" not in payload:
+        return _render_legacy_doctor_runtime_panel(payload, color=color)
+    runtime = payload["runtime"]
+    installation = payload["installation"]
+    policy = payload["policy"]
+    safety = payload["safety"]
+    imports = payload["required_imports"]
     return _panel(
         "DOCTOR RUNTIME",
         [
             (
                 "RUNTIME",
                 [
-                    ("uv", "detected" if payload.get("uv_detected") else "not_detected", "success" if payload.get("uv_detected") else "muted"),
-                    ("uv version", _value_or(payload, "uv_version", "not_detected"), "normal"),
-                    ("uv path", _value_or(payload, "uv_path", "not_detected"), "muted"),
-                    ("CPython version", _value_or(payload, "python_version", "not_detected"), "normal"),
-                    ("Python path", _value_or(payload, "python_path", "not_detected"), "muted"),
-                    ("Managed runtime", "ready" if payload.get("managed_python_detected") else "action required", "success" if payload.get("managed_python_detected") else "warning"),
+                    ("uv", "detected" if runtime["uv_detected"] else "not_detected", "success" if runtime["uv_detected"] else "warning"),
+                    ("uv version", runtime["uv_version"], "normal"),
+                    ("uv path", runtime["uv_path"], "muted"),
+                    ("Managed CPython", runtime["managed_python_version"], "normal"),
+                    ("Managed Python path", runtime["managed_python_path"], "muted"),
+                    ("Approved Python", policy["approved_python"], "success"),
+                    ("Project range", policy["project_required_range"], "normal"),
                 ],
             ),
+            ("REQUIRED IMPORTS", [(name, value.get("status", "not_available") if isinstance(value, dict) else value, "success" if isinstance(value, dict) and value.get("status") == "available" else "error") for name, value in imports.items()]),
             (
                 "INSTALLATION",
                 [
-                    ("App files", _value_or(payload, "app_files", _value_or(payload, "app_path_status")), _semantic_style_for_value(_value_or(payload, "app_files", _value_or(payload, "app_path_status")))),
-                    ("Launcher file", _value_or(payload, "launcher_file", _value_or(payload, "launcher_path_status")), _semantic_style_for_value(_value_or(payload, "launcher_file", _value_or(payload, "launcher_path_status")))),
-                    ("Launcher executable", _value_or(payload, "launcher_executable"), _semantic_style_for_value(_value_or(payload, "launcher_executable"))),
-                    ("PATH visibility", _value_or(payload, "path_visibility"), _semantic_style_for_value(_value_or(payload, "path_visibility"))),
+                    ("App files", installation["app_files"], _semantic_style_for_value(installation["app_files"])),
+                    ("Launcher file", installation["launcher_file"], _semantic_style_for_value(installation["launcher_file"])),
+                    ("Launcher executable", _bool(installation["launcher_executable"]), "success" if installation["launcher_executable"] else "warning"),
+                    ("PATH visibility", _bool(installation["path_visibility"]), "success" if installation["path_visibility"] else "warning"),
+                    ("Install metadata", installation["install_metadata_readability"], _semantic_style_for_value(installation["install_metadata_readability"])),
+                    ("Config readability", installation["config_readability"], _semantic_style_for_value(installation["config_readability"])),
+                    ("Log directory writable", _bool(installation["log_directory_writable"]), "success" if installation["log_directory_writable"] else "warning"),
                 ],
             ),
             (
                 "POLICY",
                 [
                     ("Current user only", "true", "success"),
-                    ("Administrator required", "false", "success"),
-                    ("System Python modified", "false", "success"),
-                    ("Global Python installed", "false", "success"),
-                    ("Default aliases installed", "false", "success"),
+                    ("Admin elevation", policy["admin_elevation"], "success"),
+                    ("System Python used", _bool(policy["system_python_used"]), "success"),
+                    ("System Python modified", _bool(policy["system_python_modified"]), "success"),
                 ],
             ),
             (
                 "SAFETY",
                 [
-                    ("Console probe", "not_run", "success"),
-                    ("Network scan", "not_run", "success"),
-                    ("OSC writes", 0, "success"),
+                    ("Attempted path", safety["attempted_path"], "success"),
+                    ("Console probe", safety["console_probe"], "success"),
+                    ("Internet refresh", safety["internet_source_refresh"], "success"),
+                    ("Network scan", safety["network_scan"], "success"),
+                    ("OSC writes", safety["osc_writes_sent"], "success"),
                 ],
             ),
+        ],
+        notes=["Deep local diagnostics completed without console or internet access."],
+        color=color,
+    )
+
+
+def _render_legacy_doctor_runtime_panel(payload: dict[str, Any], *, color: bool = False) -> str:
+    healthy = bool(payload.get("ok") is True or str(payload.get("status", "")).lower() in {"ok", "healthy", "ready", "passed"})
+    return _panel(
+        "DOCTOR RUNTIME",
+        [
+            ("RUNTIME", [("uv", "detected" if payload.get("uv_detected") else "not_detected", "normal"), ("uv version", _value_or(payload, "uv_version", "not_detected"), "normal"), ("CPython", _value_or(payload, "python_version", "not_detected"), "normal")]),
+            (
+                "INSTALLATION",
+                [
+                    ("App files", _value_or(payload, "app_files", "not_checked"), "normal"),
+                    ("Launcher file", _value_or(payload, "launcher_file", "not_checked"), "normal"),
+                    ("Launcher executable", _value_or(payload, "launcher_executable", "not_checked"), "normal"),
+                    ("PATH visibility", _value_or(payload, "path_visibility", "not_checked"), "normal"),
+                ],
+            ),
+            ("SAFETY", [("Console probe", "not_run", "success"), ("Network scan", "not_run", "success"), ("OSC writes", 0, "success")]),
         ],
         notes=["Healthy" if healthy else "Runtime diagnostics completed; review action-required fields."],
         color=color,
@@ -1739,7 +2109,10 @@ def render_get_info_panel(payload: dict[str, Any], *, color: bool = False) -> st
                     ("Attempted path", payload.get("attempted_path") or "/info", "normal"),
                     ("Connected", connected, "success" if connected else "error"),
                     ("Response", payload.get("status") or ("CONNECTED" if connected else "NOT_CONNECTED"), "success" if connected else "error"),
-                    ("Latency", payload.get("latency_ms") or payload.get("latency") or "not_available", "normal"),
+                    ("Latency", payload.get("latency_ms") if payload.get("latency_ms") is not None else (payload.get("latency") if payload.get("latency") is not None else "not_available"), "normal"),
+                    ("Error code", payload.get("error_code") or "none", "muted" if connected else "error"),
+                    ("Connection state", payload.get("connection_state") or ("reachable" if connected else "unreachable"), "success" if connected else "error"),
+                    ("Next action", payload.get("next_action") or "none", "muted" if connected else "command"),
                 ],
             ),
             (
@@ -1755,7 +2128,7 @@ def render_get_info_panel(payload: dict[str, Any], *, color: bool = False) -> st
                 "SAFETY",
                 [
                     ("OSC writes", payload.get("osc_writes_sent", 0), "success"),
-                    ("Network scan", "not run", "success"),
+                    ("Network scan", payload.get("network_scan", "not_run"), "success"),
                 ],
             ),
         ],
@@ -1771,6 +2144,7 @@ def render_verify_device_panel(payload: dict[str, Any], *, color: bool = False) 
     connected = bool(payload.get("connected"))
     hardware_verified = bool(payload.get("hardware_verified") is True and payload.get("classification") == "HARDWARE_VERIFIED")
     sources = payload.get("source_by_field") if isinstance(payload.get("source_by_field"), dict) else {}
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
     intended = payload.get("intended_target_type") or "unknown"
     return _panel(
         "DEVICE VERIFICATION",
@@ -1779,21 +2153,26 @@ def render_verify_device_panel(payload: dict[str, Any], *, color: bool = False) 
                 "CONFIGURED INTENT",
                 [
                     ("Intended target", display_target_type(intended), "normal"),
-                    ("Source", render_config_source_name(sources.get("intended_target_type") or sources.get("host")), "muted"),
+                    ("Configured endpoint", payload.get("endpoint") or f"{payload.get('configured_host') or payload.get('host', 'configured')}:{payload.get('configured_port') or payload.get('port', 10023)}", "normal"),
+                    ("Config source", render_config_source_name(sources.get("intended_target_type") or sources.get("host")), "muted"),
                 ],
             ),
             (
                 "OBSERVED CONNECTION",
                 [
-                    ("Configured endpoint", payload.get("endpoint") or f"{payload.get('configured_host') or payload.get('host', 'configured')}:{payload.get('configured_port') or payload.get('port', 10023)}", "normal"),
                     ("Connected", _bool(connected), "success" if connected else "warning"),
+                    ("Response", payload.get("status") or "unavailable", "success" if connected else "warning"),
+                    ("Latency", payload.get("latency_ms") if payload.get("latency_ms") is not None else (payload.get("latency") if payload.get("latency") is not None else "not_available"), "normal"),
                     ("Observed target", payload.get("observed_target_type") or "unknown", "normal" if connected else "muted"),
-                    ("Classification", payload.get("classification") or "unknown", "normal"),
+                    ("Model", data.get("model") or payload.get("model") or "unavailable", "normal" if connected else "muted"),
+                    ("Firmware", data.get("firmware") or payload.get("firmware") or payload.get("firmware_version") or "unavailable", "normal" if connected else "muted"),
+                    ("Name", data.get("name") or payload.get("name") or payload.get("device_name") or "unavailable", "normal" if connected else "muted"),
                 ],
             ),
             (
                 "VERIFICATION",
                 [
+                    ("Classification", payload.get("classification") or "unavailable", "normal"),
                     ("Hardware verified", _bool(hardware_verified), "success"),
                     ("Production ready", "false", "success"),
                 ],
@@ -1801,8 +2180,9 @@ def render_verify_device_panel(payload: dict[str, Any], *, color: bool = False) 
             (
                 "SAFETY",
                 [
+                    ("Read-only path", payload.get("attempted_path") or "/info", "success"),
                     ("OSC writes", payload.get("osc_writes_sent", 0), "success"),
-                    ("Network scan", "not run", "success"),
+                    ("Network scan", payload.get("network_scan", "not_run"), "success"),
                 ],
             ),
         ],
@@ -1828,6 +2208,17 @@ def render_setup_result_panel(payload: dict[str, Any], *, color: bool = False) -
     if not saved:
         config_rows.append(("Config not written", _bool(payload.get("config_not_written", True)), "success"))
     notes = _setup_result_notes(payload, saved=saved, connected=connected)
+    verification_rows = [
+        ("Read-only verification attempted", _bool(payload.get("verification_attempted", False)), "success"),
+        ("Attempted path", payload.get("attempted_path") or "not_attempted", "normal"),
+        ("Connection state", payload.get("connection_state") or ("reachable" if connected else "not_checked"), "success" if connected else "warning"),
+        ("Endpoint verified", _bool(endpoint_verified), "success" if endpoint_verified else "warning"),
+        ("Response", payload.get("response") or ("received" if connected else payload.get("verification_status") or payload.get("error_code") or payload.get("status") or "not_run"), "normal"),
+        ("Classification", payload.get("classification") or "not_observed", "normal" if connected else "muted"),
+    ]
+    if payload.get("legacy_installer_probe_not_run") is True:
+        verification_rows.insert(2, ("Intended path", payload.get("intended_path") or "/info", "normal"))
+        verification_rows.append(("Probe not run", "true", "success"))
     return _panel(
         "SETUP RESULT",
         [
@@ -1837,15 +2228,7 @@ def render_setup_result_panel(payload: dict[str, Any], *, color: bool = False) -
             ),
             (
                 "CONNECTION VERIFICATION",
-                [
-                    ("Attempted path", payload.get("attempted_path") if payload.get("attempted_path") else "not_attempted", "normal"),
-                    ("Intended path", payload.get("intended_path") or "/info", "normal"),
-                    ("Connected", _bool(connected), "success" if connected else "warning"),
-                    ("Endpoint verified", _bool(endpoint_verified), "success" if endpoint_verified else "warning"),
-                    ("Response", "received" if connected else payload.get("verification_status") or payload.get("status") or "not_run", "normal"),
-                    ("Classification", payload.get("classification") or "not_observed", "normal" if connected else "muted"),
-                    ("Probe not run", _bool(payload.get("probe_not_run", False)), "success"),
-                ],
+                verification_rows,
             ),
             (
                 "SAFETY",
@@ -1889,12 +2272,13 @@ def _value_or(payload: dict[str, Any], key: str, fallback: Any = "not_checked") 
 
 
 def _status_field(label: str, value: Any) -> str:
-    return f"  {label:<26}: {_human_value(value)}"
+    return f"  {sanitize_display_value(label, max_length=64):<26}: {sanitize_display_value(_human_value(value))}"
 
 
 def _status_field_colored(label: str, value: Any, style: str, colors: Colors) -> str:
-    rendered = _human_value(value)
-    return f"  {colors.MUTED}{label:<26}{colors.RESET_BG}: {_style_value(rendered, style, colors)}"
+    rendered = sanitize_display_value(_human_value(value))
+    safe_label = sanitize_display_value(label, max_length=64)
+    return f"  {colors.MUTED}{safe_label:<26}{colors.RESET_BG}: {_style_value(rendered, style, colors)}"
 
 
 def _separator(text: str, colors: Colors) -> str:
@@ -1963,6 +2347,11 @@ def _compact_help_lines() -> list[str]:
         r"  .\scripts\install.ps1 [OPTIONS]",
         "OPTIONS",
         "  -h/--help --dry-run --json --platform <name>",
+        "  --version <vX.Y.Z> --channel <stable|prerelease|main>",
+        "  --ref <FULL_40_HEX_SHA> --local",
+        "INSTALL SELECTION",
+        "  Standalone: latest stable | Checkout: local",
+        "  main and commit installs require explicit selection.",
         "STATUS COLOURS",
         "  Green OK | Yellow Action | Red Error | Slate Info/not checked",
         "COMMANDS",
@@ -2068,7 +2457,7 @@ def derive_dns_status(statuses: Iterable[str]) -> str:
 
 def _bounded_url_status(url: str, timeout: float) -> str:
     try:
-        request = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "M32-Bridge-Installer/0.1"})
+        request = urllib.request.Request(url, method="HEAD", headers={"User-Agent": INSTALLER_SOURCE_USER_AGENT})
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return "reachable" if 200 <= getattr(response, "status", 200) < 400 else "http_error"
     except urllib.error.HTTPError:
@@ -2090,6 +2479,10 @@ def _bounded_url_status(url: str, timeout: float) -> str:
 
 def render_command_picker(query: str = "/", *, color: bool = False) -> str:
     return SlashCommandPicker(SLASH_COMMANDS).render(query, Colors(color))
+
+
+def render_runtime_command_picker(query: str = "/", *, color: bool = False) -> str:
+    return SlashCommandPicker(RUNTIME_SLASH_COMMANDS).render(query, Colors(color))
 
 
 def read_single_keypress() -> str:
@@ -2216,7 +2609,7 @@ def run_runtime_tty() -> int:
     except Exception:
         print("Runtime Console could not verify the installed application. Run m32-bridge health.", file=sys.stderr)
         return 1
-    from m32_bridge.installer.runtime_manager import local_runtime_diagnostics
+    from m32_bridge.installer.runtime_manager import local_runtime_diagnostics, platform_information
 
     precondition = evaluate_console_precondition()
     app_path = Path(os.environ.get("M32_BRIDGE_APP_DIR") or _m32_bridge_module_path().parents[2])
@@ -2243,6 +2636,7 @@ def run_runtime_tty() -> int:
         "app_path": str(app_path),
         "launcher_path": str(launcher_path),
         "runtime_info": runtime,
+        "platform_info": platform_information(environ=runtime_environ),
         "console_configured": precondition.configured,
         "console_precondition_state": precondition.state,
         "console_connection_status": "not_checked",
@@ -2251,6 +2645,7 @@ def run_runtime_tty() -> int:
         "production_live_ready": False,
         "dry_run": False,
     }
+    build_runtime_status(result, environ=runtime_environ, refresh=False)
     surface = "windows" if os.name == "nt" else "posix"
     final, _ = run_tty_app(surface, result, dry_run=False, color=True)
     return int(final.get("runtime_exit_code", 0 if final.get("ok") else 1))
@@ -2268,7 +2663,10 @@ def run_tty_app(
     size_provider: Any | None = None,
 ) -> tuple[dict[str, Any], str]:
     stream = stream or sys.stdout
-    picker = SlashCommandPicker(SLASH_COMMANDS)
+    if result.get("tty_mode") == "runtime" and not isinstance(result.get("runtime_status_snapshot"), dict):
+        build_runtime_status(result, refresh=False)
+    picker_commands = RUNTIME_SLASH_COMMANDS if result.get("tty_mode") == "runtime" else SLASH_COMMANDS
+    picker = SlashCommandPicker(picker_commands)
     input_buffer = ""
     panel_lines: list[str] | None = None
     panel_offset = 0
@@ -2470,6 +2868,8 @@ def run_tty_app(
                 if input_buffer.startswith("/"):
                     selected = picker.select(input_buffer) or input_buffer
                     if selected == "/setup":
+                        if result.get("tty_mode") == "runtime":
+                            execute_installer_command(selected, result, color=color, width=terminal_size(size_provider)[0])
                         start_setup_flow()
                         draw()
                         continue
@@ -2495,11 +2895,14 @@ def run_tty_app(
                     continue
                 if key == "ENTER":
                     command = input_buffer
-                    if parse_installer_command(command) == "/setup":
+                    parser = parse_runtime_command if result.get("tty_mode") == "runtime" else parse_installer_command
+                    parsed_command = parser(command)
+                    if parsed_command == "/setup":
+                        if result.get("tty_mode") == "runtime":
+                            execute_installer_command(parsed_command, result, color=color, width=terminal_size(size_provider)[0])
                         start_setup_flow()
                         draw()
                         continue
-                    parsed_command = parse_installer_command(command)
                     if parsed_command and gate_runtime_command(parsed_command):
                         draw()
                         continue
@@ -2507,7 +2910,7 @@ def run_tty_app(
                     output, stop = execute_installer_command(command, result, color=color, width=width)
                     panel_lines = output.splitlines() if output else None
                     panel_offset = 0
-                    view = "panel"
+                    view = _view_for_command(parsed_command or command)
                     input_buffer = ""
                     draw()
                     if stop:
@@ -2542,17 +2945,17 @@ def _runtime_has_console_config() -> bool:
 
 
 def _requires_console_config(command: str) -> bool:
-    metadata = COMMAND_REGISTRY.get(command)
-    return bool(metadata and metadata.get("requires_console_config"))
+    metadata = RUNTIME_COMMAND_REGISTRY.get(command)
+    return bool(metadata and metadata.requires_console_config)
 
 
 def _can_retry_after_setup(command: str) -> bool:
-    metadata = COMMAND_REGISTRY.get(command)
+    metadata = RUNTIME_COMMAND_REGISTRY.get(command)
     return bool(
         metadata
-        and metadata.get("requires_console_config")
-        and metadata.get("read_only")
-        and metadata.get("safe_to_retry_after_setup")
+        and metadata.requires_console_config
+        and metadata.read_only
+        and metadata.safe_to_retry_after_setup
     )
 
 
@@ -2568,6 +2971,23 @@ def _requires_console_setup(command: str) -> bool:
 def _store_console_precondition(result: dict[str, Any], precondition: Any) -> None:
     result["console_precondition_state"] = precondition.state
     result["console_configured"] = precondition.state == "ready"
+    result["configuration_state"] = {
+        "setup_required": "missing",
+        "config_invalid": "invalid",
+        "ready": "valid",
+    }[precondition.state]
+    connection = str(result.get("console_connection_status") or "not_checked")
+    result["operational_state"] = (
+        "setup_required"
+        if precondition.state == "setup_required"
+        else "config_invalid"
+        if precondition.state == "config_invalid"
+        else "console_connected"
+        if connection == "reachable"
+        else "console_unreachable"
+        if connection == "unreachable"
+        else "console_not_checked"
+    )
 
 
 def termios_error() -> tuple[type[BaseException], ...]:
@@ -2612,9 +3032,9 @@ def _header_lines(colors: Colors, *, width: int, tty_mode: str = "installer") ->
     ]
 
 
-def _body_rows(surface: str, result: dict[str, Any], *, dry_run: bool) -> list[TTYRow]:
+def _body_rows(surface: str, result: dict[str, Any], *, dry_run: bool, width: int = 120, height: int = 32) -> list[TTYRow]:
     if result.get("tty_mode") == "runtime":
-        return _runtime_body_rows(result)
+        return _runtime_body_rows(result, width=width, height=height)
     from m32_bridge.installer.runtime_manager import inspect_runtime, platform_information
 
     platform_info = result.get("platform_info") or platform_information()
@@ -2657,50 +3077,77 @@ def _body_rows(surface: str, result: dict[str, Any], *, dry_run: bool) -> list[T
     return rows
 
 
-def _runtime_body_rows(result: dict[str, Any]) -> list[TTYRow]:
-    runtime = result.get("runtime_info") if isinstance(result.get("runtime_info"), dict) else {}
-    configured = bool(result.get("console_configured"))
-    precondition_state = str(result.get("console_precondition_state") or ("ready" if configured else "setup_required"))
-    connection = result.get("console_connection_status") or "not_checked"
-    rows = [
-        TTYRow("section", "RUNTIME"),
-        TTYRow("field", label="Application", value="ready", value_style="success"),
-        TTYRow("field", label="Managed Python", value="ready", value_style="success"),
-        TTYRow("field", label="Python version", value=runtime.get("managed_python_version") or runtime.get("python_version") or "3.13", value_style="success"),
-        TTYRow("field", label="Frozen launcher", value="enabled", value_style="success"),
-        TTYRow("section", "CONSOLE"),
-        TTYRow("field", label="Configured", value=_bool(configured), value_style="success" if configured else "warning"),
-        TTYRow(
-            "field",
-            label="Configuration state",
-            value=precondition_state,
-            value_style="error" if precondition_state == "config_invalid" else ("success" if precondition_state == "ready" else "warning"),
-        ),
-        TTYRow("field", label="Connection", value=connection, value_style="muted" if connection == "not_checked" else _semantic_style_for_value(connection)),
+def _runtime_body_rows(result: dict[str, Any], *, width: int = 120, height: int = 32) -> list[TTYRow]:
+    snapshot = result.get("runtime_status_snapshot")
+    if not isinstance(snapshot, dict) or not isinstance(snapshot.get("application"), dict):
+        snapshot = build_runtime_status(result, refresh=False)
+    application = snapshot["application"]
+    platform_info = snapshot["platform"]
+    runtime = snapshot["python_runtime"]
+    source = snapshot["installation_source"]
+    config = snapshot["console_configuration"]
+    connection = snapshot["console_connection"]
+    endpoint = "not_configured" if config["host"] == "not_configured" else f"{config['host']}:{config['port']}"
+    app_files = "available" if application["app_path"] != "not_available" and Path(str(application["app_path"])).exists() else "not_found"
+    launcher_status = "executable" if application["launcher_path"] != "not_available" and Path(str(application["launcher_path"])).exists() and (os.name == "nt" or os.access(str(application["launcher_path"]), os.X_OK)) else "not_executable"
+    if source["release_tag"] != "not_available":
+        release_identity = f"Version {application['version']} · Release {source['release_tag']}"
+    elif source["source_commit"] != "not_available":
+        release_identity = f"Version {application['version']} · Commit {str(source['source_commit'])[:12]}"
+    elif source["install_source"] == "local_checkout":
+        release_identity = f"Version {application['version']} · Local checkout"
+    else:
+        release_identity = f"Version {application['version']} · Source unavailable"
+    minimal = [
+        TTYRow("field", label="Product / version", value=f"{application['product']} · {release_identity}", value_style="normal"),
+        TTYRow("field", label="Source / metadata", value=f"{source['source_ref']} · {application['install_metadata_status']}", value_style="normal"),
+        TTYRow("field", label="OS / arch", value=f"{platform_info.get('os', 'unknown')} {platform_info.get('version', 'unknown')} · {platform_info.get('architecture', 'unknown')}", value_style="normal"),
+        TTYRow("field", label="Managed Python", value=runtime["managed_python_version"], value_style="success"),
+        TTYRow("field", label="Configuration state", value=f"{snapshot['configuration_state']} · {endpoint}", value_style=_semantic_style_for_value(snapshot["configuration_state"])),
+        TTYRow("field", label="Connection state", value=snapshot["connection_state"], value_style=_semantic_style_for_value(snapshot["connection_state"])),
+        TTYRow("field", label="Operational state", value=snapshot["operational_state"], value_style=_semantic_style_for_value(snapshot["operational_state"])),
+        TTYRow("field", label="OSC writes", value=0, value_style="success"),
+        TTYRow("field", label="Network scan", value="not_run", value_style="success"),
     ]
-    if precondition_state == "config_invalid":
-        rows.extend(
-            [
-                TTYRow("section", "NEXT ACTION"),
-                TTYRow("warning", "Repair the saved configuration or run /setup"),
-            ]
-        )
-    elif not configured:
-        rows.extend(
-            [
-                TTYRow("section", "NEXT ACTION"),
-                TTYRow("warning", "Run /setup to configure a console endpoint"),
-            ]
-        )
-    rows.extend(
-        [
-            TTYRow("section", "SAFETY"),
-            TTYRow("field", label="OSC writes", value=0, value_style="success"),
-            TTYRow("field", label="Network scan", value="not_run", value_style="success"),
-            TTYRow("text", "Type / to open all commands."),
-        ]
-    )
-    return rows
+    if height <= 21:
+        return minimal
+    compact = [
+        TTYRow("section", "APPLICATION"),
+        *minimal[:2],
+        TTYRow("section", "SYSTEM / RUNTIME"),
+        *minimal[2:4],
+        TTYRow("section", "CONSOLE"),
+        *minimal[4:7],
+        TTYRow("section", "SAFETY"),
+        *minimal[7:],
+    ]
+    if height < 30:
+        return compact
+    return [
+        TTYRow("section", "APPLICATION"),
+        TTYRow("field", label="Product / version", value=f"{application['product']} · {release_identity}", value_style="normal"),
+        TTYRow("field", label="Source ref / install", value=f"{source['source_ref']} · {source['install_source']}", value_style="normal"),
+        TTYRow("section", "SYSTEM"),
+        TTYRow("field", label="OS / version", value=f"{platform_info.get('os', 'unknown')} {platform_info.get('version', 'unknown')}", value_style="normal"),
+        TTYRow("field", label="Architecture / shell", value=f"{platform_info.get('architecture', 'unknown')} · {platform_info.get('shell', 'unknown')}", value_style="normal"),
+        TTYRow("section", "RUNTIME"),
+        TTYRow("field", label="uv", value=f"{runtime['uv_version']} · {runtime['uv_path']}", value_style="success" if runtime["uv_detected"] else "warning"),
+        TTYRow("field", label="Managed CPython", value=runtime["managed_python_version"], value_style="success"),
+        TTYRow("field", label="Frozen launcher", value=runtime["frozen_launcher"], value_style="success"),
+        TTYRow("field", label="Application files", value=f"{app_files} · {application['app_path']}", value_style=_semantic_style_for_value(app_files)),
+        TTYRow("field", label="Launcher status", value=f"{launcher_status} · {application['launcher_path']}", value_style=_semantic_style_for_value(launcher_status)),
+        TTYRow("section", "CONSOLE"),
+        TTYRow("field", label="Configuration state", value=snapshot["configuration_state"], value_style=_semantic_style_for_value(snapshot["configuration_state"])),
+        TTYRow("field", label="Endpoint", value=endpoint, value_style="normal"),
+        TTYRow("field", label="Label / intended target", value=f"{config['label']} · {display_target_type(config['intended_target'])}", value_style="normal"),
+        TTYRow("field", label="Connection state", value=snapshot["connection_state"], value_style=_semantic_style_for_value(snapshot["connection_state"])),
+        TTYRow("field", label="Operational state", value=snapshot["operational_state"], value_style=_semantic_style_for_value(snapshot["operational_state"])),
+        TTYRow("section", "SAFETY"),
+        TTYRow("field", label="OSC writes / scan", value="0 · not_run", value_style="success"),
+        TTYRow("field", label="Admin / System Python", value="not_used · unchanged", value_style="success"),
+        TTYRow("field", label="Hardware verified", value=_bool(snapshot["safety"]["hardware_verified"]), value_style="success"),
+        TTYRow("text", "Type / to open all commands."),
+    ]
 
 
 def _body_lines(surface: str, result: dict[str, Any], *, dry_run: bool) -> list[str]:
@@ -2720,7 +3167,6 @@ def render_footer_status(
     now = datetime.now().strftime("%H:%M:%S")
     state = result.get("status")
     runtime_mode = result.get("tty_mode") == "runtime"
-    uv = "RUNTIME READY" if runtime_mode else ("UV OK" if result.get("uv_detected") else "UV SETUP REQUIRED")
     hints = {
         "picker": "[Up/Down] Navigate | [Tab/Enter] Select | [ESC] Dismiss",
         "help": "[ESC] Back | /status | /contact | /exit",
@@ -2734,6 +3180,23 @@ def render_footer_status(
     if panel_footer:
         return f"{colors.MUTED}{panel_footer}{colors.RESET_BG}"
     legend = " | Green OK | Yellow Action | Red Error" if width >= 100 else ""
+    if runtime_mode:
+        application_health = str(result.get("application_health") or "healthy")
+        operational_state = str(result.get("operational_state") or "setup_required")
+        if application_health != "healthy":
+            summary = "RUNTIME ACTION REQUIRED"
+            style = colors.ERROR if application_health == "error" else colors.ACCENT
+        else:
+            summary = {
+                "setup_required": "RUNTIME HEALTHY · SETUP REQUIRED",
+                "config_invalid": "CONFIG INVALID · RUN /setup",
+                "console_not_checked": "RUNTIME HEALTHY · CONSOLE NOT CHECKED",
+                "console_unreachable": "RUNTIME HEALTHY · CONSOLE UNREACHABLE",
+                "console_connected": "RUNTIME HEALTHY · CONSOLE CONNECTED",
+            }.get(operational_state, "RUNTIME HEALTHY · CONSOLE NOT CHECKED")
+            style = colors.ERROR if operational_state == "config_invalid" else (colors.ACCENT if operational_state in {"setup_required", "console_unreachable"} else colors.SUCCESS)
+        return f"{colors.MUTED}{now}{colors.RESET_BG}  {style}{summary}{colors.RESET_BG}  {colors.MUTED}| {hints}{legend}{colors.RESET_BG}"
+    uv = "UV OK" if result.get("uv_detected") else "UV SETUP REQUIRED"
     return f"{colors.MUTED}{now}{colors.RESET_BG}  {colors.SUCCESS if result.get('ok') else colors.ACCENT}{state}{colors.RESET_BG}  {colors.MUTED}{uv} | {hints}{legend}{colors.RESET_BG}"
 
 
@@ -2743,6 +3206,9 @@ def _status_style(status: str) -> str:
 
 def _view_for_command(command: str) -> str:
     normalized = command.strip().lower()
+    runtime_spec = RUNTIME_COMMAND_REGISTRY.get(normalized)
+    if runtime_spec is not None:
+        return runtime_spec.view
     if normalized in {"/help", "help"}:
         return "help"
     if normalized in {"/contact", "contact"}:
@@ -2907,26 +3373,55 @@ def _next_panel_offset(current: int, total_lines: int, height: int, key: str) ->
     return min(current, max_offset)
 
 
-def _raw_installer_url_for_result(result: dict[str, Any]) -> str:
-    from m32_bridge.installer.runtime_manager import OFFICIAL_RAW_INSTALLER_URLS
+def _source_refresh_urls_for_result(result: dict[str, Any]) -> tuple[str, str] | None:
+    """Return one exact official installer/archive pair or disable refresh.
 
+    Installer status must never invent a moving ``main`` source when the current
+    plan has no validated immutable or versioned source identity.
+    """
+
+    from m32_bridge.installer.install_metadata import (
+        OFFICIAL_REPOSITORY_URL,
+        build_official_release_urls,
+        normalize_source_commit,
+        validate_release_tag,
+    )
+
+    install_source = str(result.get("install_source") or "")
+    if install_source in {"", "local_checkout", "custom"}:
+        return None
     platform_text = str(result.get("platform") or "").lower()
     surface = "windows" if platform_text.startswith("windows") else "posix"
-    source_url = str(result.get("source_url") or "")
-    if "raw.githubusercontent.com" in source_url:
-        return source_url
-    return OFFICIAL_RAW_INSTALLER_URLS[surface]
+    release_tag = result.get("release_tag")
+    provided_archive = str(result.get("source_archive_url") or result.get("source_url") or "")
+    provided_installer = str(result.get("installer_asset_url") or result.get("raw_installer_url") or "")
 
+    if release_tag not in {None, ""}:
+        try:
+            tag = validate_release_tag(release_tag)
+        except ValueError:
+            return None
+        archive_name = "m32-bridge-source.zip" if surface == "windows" else "m32-bridge-source.tar.gz"
+        installer_name = "install.ps1" if surface == "windows" else "install.sh"
+        archive_url = f"{OFFICIAL_REPOSITORY_URL}/releases/download/{tag}/{archive_name}"
+        installer_url = f"{OFFICIAL_REPOSITORY_URL}/releases/download/{tag}/{installer_name}"
+        if provided_archive and provided_archive != archive_url:
+            return None
+        if provided_installer and provided_installer != installer_url:
+            return None
+        return installer_url, archive_url
 
-def _source_archive_url_for_result(result: dict[str, Any]) -> str:
-    from m32_bridge.installer.runtime_manager import OFFICIAL_SOURCE_ARCHIVE_URLS
-
-    platform_text = str(result.get("platform") or "").lower()
-    surface = "windows" if platform_text.startswith("windows") else "posix"
-    source_url = str(result.get("source_url") or "")
-    if "github.com" in source_url and "archive" in source_url:
-        return source_url
-    return OFFICIAL_SOURCE_ARCHIVE_URLS[surface]
+    commit_value = result.get("source_commit") or result.get("source_ref")
+    try:
+        commit = normalize_source_commit(commit_value)
+    except ValueError:
+        return None
+    urls = build_official_release_urls(surface, commit)
+    if provided_archive and provided_archive != urls["source_archive_url"]:
+        return None
+    if provided_installer and provided_installer != urls["raw_installer_url"]:
+        return None
+    return urls["raw_installer_url"], urls["source_archive_url"]
 
 
 def _detected_shell_name(surface: str) -> str:

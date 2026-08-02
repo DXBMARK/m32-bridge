@@ -8,6 +8,8 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +17,18 @@ from .dependency_failures import (
     classify_install_failure,
     locked_wheel_message as _locked_wheel_message,
     write_install_diagnostic_log as _write_install_diagnostic_log,
+)
+from .application_version import resolve_staged_application_version
+from .install_metadata import (
+    assert_same_tag_immutable,
+    build_install_metadata,
+    build_official_release_urls,
+    install_metadata_path,
+    normalize_source_commit,
+    read_install_metadata,
+    validate_release_tag,
+    version_from_release_tag,
+    write_install_metadata,
 )
 from .planner import plan_dry_run_install
 from .runtime_manager import (
@@ -27,8 +41,16 @@ from .runtime_manager import (
     platform_information,
 )
 from .support_matrix import InstallerTarget, target_for_installer_platform
+from .release_download import ReleasePreflightError, preflight_release_install
+from .release_selection import (
+    InstallationSelection,
+    ReleaseResolution,
+    ReleaseResolutionError,
+    ReleaseResolver,
+    ReleaseSelectionError,
+    resolve_installation_selection,
+)
 
-VERSION = "0.1.0"
 IDEMPOTENCY_STATES = (
     "fresh_install",
     "existing_install",
@@ -46,11 +68,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--json", action="store_true", dest="json_output")
     parser.add_argument("--platform", choices=("macos", "linux", "wsl", "raspberry_pi_os", "windows_powershell", "windows_cmd"))
+    parser.add_argument("--version", help="Install one specific v-prefixed GitHub Release tag")
+    parser.add_argument("--channel", choices=("stable", "prerelease", "main"), help="Select stable, prerelease, or explicit main development source")
+    parser.add_argument("--ref", help="Install one immutable full 40-character commit SHA")
+    parser.add_argument("--local", action="store_true", help="Install the current local checkout without network access")
     parser.add_argument("--current-version")
-    parser.add_argument("--target-version", default=VERSION)
-    parser.add_argument("--install-source", choices=("local_checkout", "github_raw", "github_release_or_archive"), default=os.environ.get("M32_INSTALL_SOURCE_KIND", "local_checkout"))
-    parser.add_argument("--source-url", default=os.environ.get("M32_INSTALL_SOURCE_URL"))
-    parser.add_argument("--source-ref", default=os.environ.get("M32_INSTALL_SOURCE_REF"))
+    parser.add_argument("--target-version", default=os.environ.get("M32_INSTALL_APPLICATION_VERSION"), help=argparse.SUPPRESS)
+    parser.add_argument("--install-source", help=argparse.SUPPRESS)
+    parser.add_argument("--source-url", default=os.environ.get("M32_INSTALL_SOURCE_URL"), help=argparse.SUPPRESS)
+    parser.add_argument("--source-ref", default=os.environ.get("M32_INSTALL_SOURCE_REF"), help=argparse.SUPPRESS)
+    parser.add_argument("--release-tag", default=os.environ.get("M32_INSTALL_RELEASE_TAG"), help=argparse.SUPPRESS)
+    parser.add_argument("--source-commit", default=os.environ.get("M32_INSTALL_SOURCE_COMMIT"), help=argparse.SUPPRESS)
+    parser.add_argument("--source-root", default=os.environ.get("M32_INSTALL_SOURCE_ROOT"), help=argparse.SUPPRESS)
+    parser.add_argument("--archive-path", default=os.environ.get("M32_INSTALL_ARCHIVE_PATH"), help=argparse.SUPPRESS)
+    parser.add_argument("--manifest-path", default=os.environ.get("M32_INSTALL_MANIFEST_PATH"), help=argparse.SUPPRESS)
+    parser.add_argument("--bootstrap-plan", default=os.environ.get("M32_INSTALL_BOOTSTRAP_PLAN"), help=argparse.SUPPRESS)
     parser.add_argument("--confirm-dependency-actions", action="store_true")
     parser.add_argument("--bootstrap-apply", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--uv-bin", default=os.environ.get("M32_INSTALL_UV_BIN"), help=argparse.SUPPRESS)
@@ -58,6 +90,40 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--color", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
+    source_root = Path(args.source_root).resolve(strict=False) if args.source_root else _repo_root()
+    bootstrap_plan: dict[str, Any] | None = None
+    try:
+        if args.bootstrap_plan:
+            bootstrap_plan = _load_bootstrap_plan(
+                Path(args.bootstrap_plan),
+                surface=args.surface,
+                source_root=source_root,
+                version=args.version,
+                channel=args.channel,
+                ref=args.ref,
+                local=args.local or None,
+            )
+            selection, resolution = _selection_and_resolution_from_bootstrap_plan(bootstrap_plan)
+        else:
+            selection = resolve_installation_selection(
+                version=args.version,
+                channel=args.channel,
+                ref=args.ref,
+                local=args.local or None,
+                source_root=source_root,
+            )
+            resolution = ReleaseResolver().resolve(selection)
+    except (ReleaseSelectionError, ReleaseResolutionError, ValueError, OSError) as exc:
+        code = getattr(exc, "code", "INSTALL_SELECTION_CONFLICT")
+        payload = _early_selection_failure(args.surface, code, str(exc))
+        print(json.dumps(payload, indent=2, sort_keys=True) if args.json_output else payload["message"])
+        return 1
+    try:
+        _assert_internal_selection_compatible(args, selection, resolution)
+    except ReleaseSelectionError as exc:
+        payload = _early_selection_failure(args.surface, exc.code, str(exc))
+        print(json.dumps(payload, indent=2, sort_keys=True) if args.json_output else payload["message"])
+        return 1
     result = build_install_result(
         surface=args.surface,
         platform=args.platform,
@@ -68,10 +134,23 @@ def main(argv: list[str] | None = None) -> int:
         local_app_data=os.environ.get("LOCALAPPDATA"),
         current_version=args.current_version,
         target_version=args.target_version,
-        install_source=args.install_source,
-        source_url=args.source_url,
-        source_ref=args.source_ref,
+        install_source=(bootstrap_plan or {}).get("install_source") or args.install_source,
+        source_url=(bootstrap_plan or {}).get("source_archive_url") or args.source_url,
+        source_ref=(bootstrap_plan or {}).get("source_ref") or args.source_ref,
+        release_tag=(bootstrap_plan or {}).get("release_tag") or args.release_tag,
+        source_commit=(bootstrap_plan or {}).get("source_commit") or args.source_commit,
+        selection=selection,
+        release_resolution=resolution,
+        staged_source_root=source_root,
     )
+    archive_path = (bootstrap_plan or {}).get("archive_path") or args.archive_path
+    manifest_path = (bootstrap_plan or {}).get("manifest_path") or args.manifest_path
+    if archive_path:
+        result["_archive_path"] = archive_path
+    if manifest_path:
+        result["_manifest_path"] = manifest_path
+    if bootstrap_plan is not None:
+        result["_bootstrap_plan_status"] = bootstrap_plan["status"]
     tty_mode = bool(args.tty or (sys.stdin.isatty() and sys.stdout.isatty() and not args.json_output))
     if not args.dry_run:
         if not result["installer_can_continue"]:
@@ -90,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if args.json_output:
-        print(json.dumps(result, indent=2, sort_keys=True))
+        print(json.dumps(_without_private_fields(result), indent=2, sort_keys=True))
     elif tty_mode and result.get("runtime_info", {}).get("application_runtime_ready"):
         try:
             return handoff_to_installed_runtime(args.surface, result)
@@ -116,6 +195,304 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if result["ok"] else 1
 
 
+
+_BOOTSTRAP_PLAN_FIELDS = frozenset(
+    {
+        "schema_version",
+        "ok",
+        "status",
+        "surface",
+        "dry_run",
+        "requested_selection",
+        "selection_kind",
+        "release_channel",
+        "release_tag",
+        "source_commit",
+        "source_ref",
+        "install_source",
+        "manifest_status",
+        "manifest_schema_version",
+        "archive_checksum_status",
+        "staged_application_version",
+        "application_version",
+        "identity_status",
+        "source_archive_url",
+        "source_archive_sha256",
+        "installer_asset_url",
+        "installer_asset_sha256",
+        "manifest_path",
+        "archive_path",
+        "source_root",
+        "user_local",
+        "admin_required",
+        "system_python_modified",
+        "network_scan",
+        "console_probe",
+        "osc_writes_sent",
+        "hardware_verified",
+        "production_live_ready",
+    }
+)
+_BOOTSTRAP_PLAN_MAX_BYTES = 256 * 1024
+
+
+def _load_bootstrap_plan(
+    path: Path,
+    *,
+    surface: str,
+    source_root: Path,
+    version: str | None,
+    channel: str | None,
+    ref: str | None,
+    local: bool | None,
+) -> dict[str, Any]:
+    if local:
+        raise ReleaseSelectionError("INSTALL_SELECTION_CONFLICT", "A verified remote bootstrap plan cannot be combined with --local.")
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise ReleaseSelectionError("BOOTSTRAP_PLAN_INVALID", "Verified bootstrap plan is unavailable.") from exc
+    if not payload or len(payload) > _BOOTSTRAP_PLAN_MAX_BYTES:
+        raise ReleaseSelectionError("BOOTSTRAP_PLAN_INVALID", "Verified bootstrap plan size is invalid.")
+    try:
+        document = json.loads(payload.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ReleaseSelectionError("BOOTSTRAP_PLAN_INVALID", "Verified bootstrap plan JSON is invalid.") from exc
+    if not isinstance(document, dict) or set(document) != _BOOTSTRAP_PLAN_FIELDS:
+        raise ReleaseSelectionError("BOOTSTRAP_PLAN_INVALID", "Verified bootstrap plan fields are invalid.")
+    if (
+        document.get("schema_version") != "1"
+        or document.get("ok") is not True
+        or document.get("dry_run") is not False
+        or document.get("surface") != surface
+        or document.get("status") not in {"release_preflight_complete", "commit_preflight_complete"}
+        or document.get("user_local") is not True
+        or document.get("admin_required") is not False
+        or document.get("system_python_modified") is not False
+        or document.get("network_scan") != "not_run"
+        or document.get("console_probe") != "not_run"
+        or document.get("osc_writes_sent") != 0
+        or document.get("identity_status") != "validated"
+    ):
+        raise ReleaseSelectionError("BOOTSTRAP_PLAN_INVALID", "Verified bootstrap plan state is invalid.")
+    plan_dir = path.parent.expanduser().resolve(strict=False)
+    plan_root = Path(str(document.get("source_root") or "")).expanduser()
+    if not plan_root.is_absolute() or plan_root.resolve(strict=False) != source_root.resolve(strict=False):
+        raise ReleaseSelectionError("BOOTSTRAP_PLAN_INVALID", "Bootstrap plan source root does not match --source-root.")
+    try:
+        plan_root.resolve(strict=False).relative_to(plan_dir)
+    except ValueError as exc:
+        raise ReleaseSelectionError("BOOTSTRAP_PLAN_INVALID", "Bootstrap plan source root escapes its staging directory.") from exc
+    required = (plan_root / "pyproject.toml", plan_root / "uv.lock", plan_root / "src" / "m32_bridge")
+    if not required[0].is_file() or not required[1].is_file() or not required[2].is_dir():
+        raise ReleaseSelectionError("BOOTSTRAP_PLAN_INVALID", "Bootstrap plan source root is incomplete.")
+    commit = normalize_source_commit(document.get("source_commit"))
+    if document.get("source_ref") != commit:
+        raise ReleaseSelectionError("BOOTSTRAP_PLAN_INVALID", "Bootstrap plan source_ref does not match source_commit.")
+    if document.get("staged_application_version") != document.get("application_version"):
+        raise ReleaseSelectionError("BOOTSTRAP_PLAN_INVALID", "Bootstrap plan application version fields disagree.")
+    install_source = document.get("install_source")
+    kind = document.get("selection_kind")
+    if install_source == "github_release_asset":
+        tag = validate_release_tag(document.get("release_tag"))
+        if kind not in {"stable", "version", "prerelease"}:
+            raise ReleaseSelectionError("BOOTSTRAP_PLAN_INVALID", "Release bootstrap selection kind is invalid.")
+        if document.get("manifest_status") != "validated" or document.get("archive_checksum_status") != "verified":
+            raise ReleaseSelectionError("BOOTSTRAP_PLAN_INVALID", "Release bootstrap verification is incomplete.")
+        for field in ("manifest_path", "archive_path"):
+            candidate = Path(str(document.get(field) or ""))
+            if not candidate.is_absolute() or not candidate.is_file():
+                raise ReleaseSelectionError("BOOTSTRAP_PLAN_INVALID", f"Bootstrap plan {field} is unavailable.")
+            try:
+                candidate.resolve(strict=False).relative_to(plan_dir)
+            except ValueError as exc:
+                raise ReleaseSelectionError("BOOTSTRAP_PLAN_INVALID", f"Bootstrap plan {field} escapes staging.") from exc
+        archive_name = "m32-bridge-source.zip" if surface == "windows" else "m32-bridge-source.tar.gz"
+        installer_name = "install.ps1" if surface == "windows" else "install.sh"
+        expected_archive_url = f"https://github.com/DXBMARK/m32-bridge/releases/download/{tag}/{archive_name}"
+        expected_installer_url = f"https://github.com/DXBMARK/m32-bridge/releases/download/{tag}/{installer_name}"
+        if document.get("source_archive_url") != expected_archive_url or document.get("installer_asset_url") != expected_installer_url:
+            raise ReleaseSelectionError("BOOTSTRAP_PLAN_INVALID", "Bootstrap Release asset URLs do not match tag and platform.")
+        if document.get("application_version") != version_from_release_tag(tag):
+            raise ReleaseSelectionError("BOOTSTRAP_PLAN_INVALID", "Bootstrap Release version does not match release_tag.")
+        for field in ("source_archive_sha256", "installer_asset_sha256"):
+            value = document.get(field)
+            if not isinstance(value, str) or len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+                raise ReleaseSelectionError("BOOTSTRAP_PLAN_INVALID", f"Bootstrap plan {field} is invalid.")
+        if version and validate_release_tag(version) != tag:
+            raise ReleaseSelectionError("INSTALL_SELECTION_CONFLICT", "Bootstrap release tag conflicts with --version.")
+        if channel and kind != channel:
+            raise ReleaseSelectionError("INSTALL_SELECTION_CONFLICT", "Bootstrap release channel conflicts with --channel.")
+        if ref:
+            raise ReleaseSelectionError("INSTALL_SELECTION_CONFLICT", "Release bootstrap plan conflicts with --ref.")
+    elif install_source in {"github_commit_archive", "github_main"}:
+        expected_kind = "commit" if install_source == "github_commit_archive" else "main"
+        if kind != expected_kind or document.get("release_tag") is not None:
+            raise ReleaseSelectionError("BOOTSTRAP_PLAN_INVALID", "Commit bootstrap identity is invalid.")
+        archive = Path(str(document.get("archive_path") or ""))
+        if not archive.is_absolute() or not archive.is_file():
+            raise ReleaseSelectionError("BOOTSTRAP_PLAN_INVALID", "Bootstrap commit archive is unavailable.")
+        try:
+            archive.resolve(strict=False).relative_to(plan_dir)
+        except ValueError as exc:
+            raise ReleaseSelectionError("BOOTSTRAP_PLAN_INVALID", "Bootstrap commit archive escapes staging.") from exc
+        expected_source_url = build_official_release_urls(surface, commit)["source_archive_url"]
+        if document.get("source_archive_url") != expected_source_url:
+            raise ReleaseSelectionError("BOOTSTRAP_PLAN_INVALID", "Bootstrap commit archive URL does not match source_commit.")
+        if document.get("manifest_path") is not None or document.get("manifest_status") != "not_applicable":
+            raise ReleaseSelectionError("BOOTSTRAP_PLAN_INVALID", "Commit bootstrap plan must not claim Release manifest provenance.")
+        if ref and normalize_source_commit(ref) != commit:
+            raise ReleaseSelectionError("INSTALL_SELECTION_CONFLICT", "Bootstrap commit conflicts with --ref.")
+        if channel and channel != expected_kind:
+            raise ReleaseSelectionError("INSTALL_SELECTION_CONFLICT", "Bootstrap commit mode conflicts with --channel.")
+        if version:
+            raise ReleaseSelectionError("INSTALL_SELECTION_CONFLICT", "Commit bootstrap plan conflicts with --version.")
+    else:
+        raise ReleaseSelectionError("BOOTSTRAP_PLAN_INVALID", "Bootstrap install_source is invalid.")
+    return document
+
+
+def _selection_and_resolution_from_bootstrap_plan(
+    plan: dict[str, Any],
+) -> tuple[InstallationSelection, ReleaseResolution]:
+    kind = str(plan["selection_kind"])
+    tag = plan.get("release_tag")
+    commit = normalize_source_commit(plan.get("source_commit"))
+    selection = InstallationSelection(
+        requested_selection=str(plan["requested_selection"]),
+        kind=kind,
+        channel=plan.get("release_channel") if kind != "version" else None,
+        version=tag[1:] if kind == "version" and isinstance(tag, str) else None,
+        release_tag=tag if kind == "version" else None,
+        source_commit=commit if kind == "commit" else None,
+        install_source=str(plan["install_source"]),
+        origin="verified_bootstrap_plan",
+    )
+    resolution = ReleaseResolution(
+        requested_selection=str(plan["requested_selection"]),
+        selection_kind=kind,
+        release_channel=plan.get("release_channel"),
+        release_tag=tag,
+        source_commit=commit,
+        source_ref=commit,
+        install_source=str(plan["install_source"]),
+        published_at=None,
+        manifest_asset_url=plan.get("manifest_path"),
+    )
+    return selection, resolution
+
+def _prepare_install_preflight(surface: str, result: dict[str, Any]) -> dict[str, Any]:
+    """Finish all source identity checks before any install target is touched."""
+
+    source_root = Path(str(result.get("_source_root") or _repo_root())).resolve(strict=False)
+    install_source = str(result.get("install_source") or "local_checkout")
+    if install_source == "github_release_asset":
+        raw_resolution = result.get("_release_resolution")
+        if not isinstance(raw_resolution, dict):
+            raise ReleasePreflightError("RELEASE_RESPONSE_INVALID", "Resolved Release identity is unavailable.")
+        resolution = ReleaseResolution(**raw_resolution)
+        manifest_document: bytes | None = None
+        manifest_path = result.get("_manifest_path")
+        if manifest_path:
+            try:
+                manifest_document = Path(str(manifest_path)).read_bytes()
+            except OSError as exc:
+                raise ReleasePreflightError("RELEASE_MANIFEST_MISSING", "Staged Release manifest is unavailable.") from exc
+        preflight = preflight_release_install(
+            resolution,
+            platform="windows" if surface == "windows" else "posix",
+            manifest_document=manifest_document,
+            archive_path=result.get("_archive_path"),
+            requested_version=(resolution.release_tag if resolution.selection_kind == "version" else None),
+        )
+        result.update(preflight.as_dict())
+        result.update(
+            {
+                "application_version": preflight.staged_application_version,
+                "application_version_source": "staged_pyproject",
+                "release_tag": preflight.resolved_release_tag,
+                "source_commit": preflight.resolved_source_commit,
+                "source_ref": preflight.resolved_source_commit,
+                "_source_root": preflight.staged_source_root,
+            }
+        )
+    else:
+        staged = resolve_staged_application_version(source_root)
+        if staged.status != "resolved":
+            raise ReleasePreflightError("RELEASE_VERSION_MISMATCH", "Selected source has no valid staged pyproject.toml version.")
+        assertion = result.get("target_version")
+        if assertion and str(assertion) != staged.version:
+            raise ReleasePreflightError("RELEASE_VERSION_MISMATCH", "Requested version assertion does not match staged source truth.")
+        if install_source in {"github_commit_archive", "github_main"}:
+            commit = result.get("source_commit") or result.get("source_ref")
+            from .install_metadata import build_official_release_urls, normalize_source_commit
+
+            commit = normalize_source_commit(commit)
+            result["source_commit"] = commit
+            result["source_ref"] = commit
+            result["source_url"] = build_official_release_urls(surface, commit)["source_archive_url"]
+        elif install_source != "local_checkout":
+            raise ReleasePreflightError("SOURCE_BOUNDARY_REJECTED", "Unsupported installation source.")
+        result.update(
+            {
+                "selection_state": result.get("selection") or "local",
+                "resolved_release_tag": None,
+                "resolved_source_commit": result.get("source_commit"),
+                "manifest_status": "not_applicable",
+                "manifest_schema_version": None,
+                "archive_checksum_status": "not_applicable" if install_source == "local_checkout" else "verified_by_commit_source",
+                "staged_application_version": staged.version,
+                "identity_status": "validated",
+                "application_version": staged.version,
+                "application_version_source": "staged_pyproject",
+                "_source_root": str(source_root),
+            }
+        )
+
+    existing = read_install_metadata(install_metadata_path(app_path=Path(str(result["app_path"]))))
+    if existing.get("status") == "metadata_valid":
+        assert_same_tag_immutable(
+            existing.get("data") or {},
+            {"release_tag": result.get("release_tag"), "source_commit": result.get("source_commit")},
+        )
+    return result
+
+
+def _early_selection_failure(surface: str, code: str, message: str) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "status": "failed",
+        "error_code": code,
+        "message": message,
+        "surface": surface,
+        "application_runtime_ready": False,
+        "full_tty_allowed": False,
+        "network_scan": "not_run",
+        "console_probe": "not_run",
+        "osc_writes_sent": 0,
+        "hardware_verified": False,
+        "production_live_ready": False,
+    }
+
+
+def _assert_internal_selection_compatible(
+    args: argparse.Namespace,
+    selection: InstallationSelection,
+    resolution: ReleaseResolution,
+) -> None:
+    if args.release_tag and args.release_tag != resolution.release_tag:
+        raise ReleaseSelectionError("INSTALL_SELECTION_CONFLICT", "Internal release_tag conflicts with public selection.")
+    if args.source_commit and str(args.source_commit).lower() != str(resolution.source_commit or "").lower():
+        raise ReleaseSelectionError("INSTALL_SELECTION_CONFLICT", "Internal source_commit conflicts with public selection.")
+    if args.install_source and args.install_source != resolution.install_source:
+        legacy = {
+            "github_release_or_archive": "github_release_asset",
+            "github_raw": "github_commit_archive",
+        }.get(args.install_source, args.install_source)
+        if legacy != resolution.install_source:
+            raise ReleaseSelectionError("INSTALL_SELECTION_CONFLICT", "Internal install_source conflicts with public selection.")
+
+
 def perform_apply_install(
     surface: str,
     result: dict[str, Any],
@@ -125,17 +502,36 @@ def perform_apply_install(
 ) -> dict[str, Any]:
     bootstrap_apply = bool(bootstrap_apply or result.get("bootstrap_apply"))
     uv_bin = uv_bin or result.get("uv_bin") or os.environ.get("M32_INSTALL_UV_BIN")
+    install_metadata_status = "not_attempted"
+    metadata_warning: str | None = None
+    try:
+        _prepare_install_preflight(surface, result)
+        pending_metadata = build_install_metadata(surface, result)
+    except (ReleasePreflightError, ReleaseSelectionError, ReleaseResolutionError, ValueError) as exc:
+        return _controlled_install_failure(
+            surface,
+            result,
+            error_code=getattr(exc, "code", str(exc).split(":", 1)[0]),
+            failed_step="release_preflight",
+            message=str(exc),
+            recovery_action="Review the selected Release identity and rerun the installer; no installed files were replaced.",
+        )
     try:
         resolved_uv_bin = _resolve_uv_executable(surface, uv_bin)
+        result["bootstrap_apply"] = bootstrap_apply
         _apply_user_local_install(surface, result, uv_bin=resolved_uv_bin)
-        runtime_readiness = (
-            _synchronize_application_runtime(surface, result, uv_bin=resolved_uv_bin)
-            if bootstrap_apply
-            else {
-                "ready": True,
-                "managed_python_version": result.get("runtime_info", {}).get("managed_python_version") or "3.13.x",
-                "required_imports": "not_run_internal_call",
-            }
+        candidate_readiness = result.pop("_candidate_readiness", None)
+        runtime_readiness = dict(
+            candidate_readiness
+            or (
+                _synchronize_application_runtime(surface, result, uv_bin=resolved_uv_bin)
+                if bootstrap_apply
+                else {
+                    "ready": True,
+                    "managed_python_version": result.get("runtime_info", {}).get("managed_python_version") or "3.13.x",
+                    "required_imports": "not_run_internal_call",
+                }
+            )
         )
         if not runtime_readiness.get("ready"):
             raise InstallStepError(
@@ -144,6 +540,19 @@ def perform_apply_install(
                 message=str(runtime_readiness.get("message") or "Required application imports did not pass."),
                 recovery_action="Rerun the installer to repair the user-local application environment.",
             )
+        # Metadata is provenance evidence, not part of application readiness.
+        # Persist it only after all materialization/readiness gates have passed.
+        try:
+            write_install_metadata(
+                pending_metadata,
+                app_path=Path(str(result["app_path"])),
+            )
+            (Path(str(result["app_path"])) / ".install-provenance-pending").unlink(missing_ok=True)
+            install_metadata_status = "written"
+        except OSError as exc:
+            install_metadata_status = "write_failed"
+            metadata_warning = "Install metadata could not be written; source provenance is unavailable."
+            _best_effort_metadata_diagnostic(result, exc)
     except OSError as exc:
         return _controlled_install_failure(
             surface,
@@ -152,7 +561,7 @@ def perform_apply_install(
             failed_step="application_install",
             message=f"Application files could not be installed: {exc}",
             recovery_action="Rerun the installer to repair the user-local application files.",
-            partial=True,
+            partial=False,
         )
     except ValueError as exc:
         return _controlled_install_failure(
@@ -171,7 +580,7 @@ def perform_apply_install(
             failed_step=exc.failed_step,
             message=exc.message,
             recovery_action=exc.recovery_action,
-            partial=True,
+            partial=False,
             dependency_package=exc.dependency_package,
             target_platform=exc.target_platform,
             python_version=exc.python_version,
@@ -181,6 +590,7 @@ def perform_apply_install(
     status = "already_current" if result["status"] in {"fresh_install", "repair", "update"} else result["status"]
     mcp_guidance, lifecycle_guidance = _post_install_guidance(surface, result, status=status)
     public_result = _without_private_fields(result)
+    public_result.pop("source_status", None)
     runtime_info = {
         **dict(public_result.get("runtime_info") or {}),
         "application_runtime_ready": True,
@@ -190,8 +600,9 @@ def perform_apply_install(
         "admin_used": False,
         "network_scan": "not_run",
         "console_probe": "not_run",
+        "install_metadata_status": install_metadata_status,
     }
-    return {
+    completed = {
         **public_result,
         "ok": True,
         "status": status,
@@ -232,6 +643,10 @@ def perform_apply_install(
         "production_live_ready": False,
         "osc_writes_sent": 0,
     }
+    if metadata_warning:
+        completed["runtime_info"]["install_metadata_warning"] = metadata_warning
+        completed["recommendations"] = [*list(completed.get("recommendations") or []), metadata_warning]
+    return completed
 
 
 class InstallStepError(RuntimeError):
@@ -452,7 +867,41 @@ def _synchronize_application_runtime(surface: str, result: dict[str, Any], *, uv
 
 
 def _without_private_fields(result: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in result.items() if key not in {"bootstrap_apply", "uv_bin"}}
+    identity_keys = {
+        "application_version",
+        "application_version_source",
+        "selection",
+        "requested_selection",
+        "release_channel",
+        "release_tag",
+        "source_commit",
+        "selection_state",
+        "resolved_release_tag",
+        "resolved_source_commit",
+        "manifest_status",
+        "manifest_schema_version",
+        "archive_checksum_status",
+        "staged_application_version",
+        "identity_status",
+        "source_archive_url",
+        "source_archive_sha256",
+        "installer_asset_url",
+        "installer_asset_sha256",
+    }
+    public = {
+        key: value
+        for key, value in result.items()
+        if not key.startswith("_") and key not in {"bootstrap_apply", "uv_bin"} and key not in identity_keys
+    }
+    identity = {key: result.get(key) for key in identity_keys if key in result}
+    if identity:
+        public["runtime_info"] = {**dict(public.get("runtime_info") or {}), "release_preflight": identity}
+    public["install_source"] = {
+        "github_release_asset": "release_archive",
+        "github_commit_archive": "github_release_or_archive",
+        "github_main": "github_release_or_archive",
+    }.get(str(result.get("install_source")), result.get("install_source"))
+    return public
 
 
 def _run_install_command(
@@ -512,7 +961,21 @@ def _target_for_result(result: dict[str, Any]) -> InstallerTarget | None:
 
 
 def _diagnostic_log_dir(result: dict[str, Any]) -> Path:
+    if result.get("_diagnostic_log_dir_override"):
+        return Path(str(result["_diagnostic_log_dir_override"]))
     return Path(result["app_path"]).parent / "logs"
+
+
+def _best_effort_metadata_diagnostic(result: dict[str, Any], exc: BaseException) -> None:
+    try:
+        _write_install_diagnostic_log(
+            _diagnostic_log_dir(result),
+            stdout="",
+            stderr=f"install metadata {type(exc).__name__}: {exc}",
+        )
+    except Exception:
+        # Diagnostic persistence must never reverse a ready application state.
+        return
 
 
 def _post_install_guidance(surface: str, result: dict[str, Any], *, status: str) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -565,11 +1028,56 @@ def build_install_result(
     uv_state: RuntimeManagerState | None = None,
     current_version: str | None = None,
     target_version: str | None = None,
-    install_source: str = "local_checkout",
+    install_source: str | None = None,
     source_url: str | None = None,
     source_ref: str | None = None,
+    release_tag: str | None = None,
+    source_commit: str | None = None,
+    selection: InstallationSelection | None = None,
+    release_resolution: ReleaseResolution | None = None,
+    staged_source_root: Path | str | None = None,
 ) -> dict[str, Any]:
     surface_platform = platform or _detect_platform(surface)
+    source_root = Path(staged_source_root).resolve(strict=False) if staged_source_root is not None else _repo_root()
+    explicit_install_source = install_source
+    selection = selection or resolve_installation_selection(source_root=source_root)
+    if release_resolution is None:
+        if explicit_install_source and explicit_install_source != selection.install_source:
+            release_resolution = ReleaseResolution(
+                selection.requested_selection,
+                selection.kind,
+                selection.channel,
+                release_tag,
+                source_commit,
+                source_ref,
+                explicit_install_source,
+            )
+        elif selection.kind == "local":
+            release_resolution = ReleaseResolution("local", "local", None, None, None, None, "local_checkout")
+        else:
+            release_resolution = ReleaseResolution(
+                selection.requested_selection,
+                selection.kind,
+                selection.channel,
+                release_tag,
+                source_commit,
+                source_ref,
+                explicit_install_source or selection.install_source,
+            )
+    install_source = release_resolution.install_source
+    release_tag = release_resolution.release_tag or release_tag
+    source_commit = release_resolution.source_commit or source_commit
+    source_ref = release_resolution.source_ref or source_ref
+    if install_source == "local_checkout":
+        version_resolution = resolve_staged_application_version(source_root)
+        if version_resolution.status != "resolved":
+            raise ValueError("PROJECT_VERSION_INVALID: local checkout pyproject.toml is invalid.")
+        application_version = version_resolution.version
+        version_source = "local_checkout_pyproject"
+    else:
+        # Remote source truth is finalized only after extraction in preflight.
+        application_version = None
+        version_source = None
     app_exists, launcher_exists = _detect_existing_state(surface, home=home, local_app_data=local_app_data)
     runtime = uv_state or _uv_state_from_environment()
     uv_detected = runtime.uv_status in {"present", "installed_user_local"}
@@ -581,7 +1089,7 @@ def build_install_result(
         local_app_data=local_app_data or os.environ.get("LOCALAPPDATA"),
         uv_state=runtime,
         current_version=current_version,
-        target_version=target_version or VERSION,
+        target_version=application_version,
         app_exists=app_exists,
         launcher_exists=launcher_exists,
         partial_failure_marker=_partial_failure_marker(surface, home=home, local_app_data=local_app_data),
@@ -601,8 +1109,13 @@ def build_install_result(
             "dry_run": dry_run,
             "install_source": install_source,
             "source_url": source_url,
-            "source_ref": source_ref or target_version or VERSION,
-            "target_version": target_version or VERSION,
+            "source_ref": source_ref,
+            "target_version": target_version,
+            "application_version": application_version,
+            "application_version_source": version_source,
+            "selection": selection.requested_selection,
+            "requested_selection": selection.requested_selection,
+            "release_channel": release_resolution.release_channel,
             "uv_required": True,
             "uv_detected": uv_detected,
             "python_required": True,
@@ -620,12 +1133,32 @@ def build_install_result(
             "installer_can_continue": uv_detected and (not required_actions or confirmed_dependency_actions),
             "confirmation_required": bool(required_actions),
             "required_actions": required_actions,
+            "_source_root": str(source_root),
+            "_release_resolution": asdict(release_resolution),
         }
     )
+    if release_tag:
+        result["release_tag"] = release_tag
+    if source_commit:
+        result["source_commit"] = source_commit
     result["lifecycle_guidance"] = _lifecycle_guidance(surface, result)
     result["message"] = _message(result)
     result["recommendations"] = _recommendations(surface, result)
     _assert_user_local_result(surface, result)
+    if dry_run:
+        plan_keys = {
+            "application_version",
+            "application_version_source",
+            "selection",
+            "requested_selection",
+            "release_channel",
+            "release_tag",
+            "source_commit",
+        }
+        plan = {key: result.pop(key) for key in tuple(plan_keys) if key in result}
+        result.pop("_source_root", None)
+        result.pop("_release_resolution", None)
+        result["runtime_info"] = {**dict(result.get("runtime_info") or {}), "release_selection_plan": plan}
     return result
 
 
@@ -708,16 +1241,86 @@ def _apply_user_local_install(surface: str, result: dict[str, Any], *, uv_bin: s
     resolved_uv_bin = _resolve_uv_executable(surface, uv_bin)
     app_path = Path(result["app_path"])
     launcher_path = Path(result["launcher_path"])
-    _materialize_app(app_path)
+    source_root = Path(str(result.get("_source_root") or ""))
+    _assert_materialization_source(source_root)
+    app_path.parent.mkdir(parents=True, exist_ok=True)
+    launcher_path.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".m32-bridge-candidate-", dir=app_path.parent))
+    candidate_app = staging / "app"
+    candidate_launcher = staging / launcher_path.name
+    backup_app = staging / "previous-app"
+    backup_launcher = staging / "previous-launcher"
+    app_swapped = False
+    launcher_swapped = False
+    try:
+        _materialize_app(candidate_app, source_root=source_root)
+        (candidate_app / ".install-provenance-pending").write_text("pending\n", encoding="utf-8")
+        _write_launcher(surface, candidate_launcher, final_app_path=app_path, final_launcher_path=launcher_path, uv_bin=resolved_uv_bin)
+        candidate_result = {
+            **result,
+            "app_path": str(candidate_app),
+            "launcher_path": str(candidate_launcher),
+            "_diagnostic_log_dir_override": str(app_path.parent / "logs"),
+        }
+        readiness = (
+            _synchronize_application_runtime(surface, candidate_result, uv_bin=resolved_uv_bin)
+            if result.get("bootstrap_apply")
+            else {
+                "ready": True,
+                "managed_python_version": result.get("runtime_info", {}).get("managed_python_version") or "3.13.x",
+                "required_imports": "not_run_internal_call",
+            }
+        )
+        if not readiness.get("ready"):
+            raise InstallStepError(
+                error_code="APPLICATION_RUNTIME_NOT_READY",
+                failed_step="application_runtime_readiness",
+                message=str(readiness.get("message") or "Required application imports did not pass."),
+                recovery_action="Rerun the installer to repair the user-local application environment.",
+            )
+        if app_path.exists():
+            os.replace(app_path, backup_app)
+        os.replace(candidate_app, app_path)
+        app_swapped = True
+        if launcher_path.exists():
+            os.replace(launcher_path, backup_launcher)
+        os.replace(candidate_launcher, launcher_path)
+        launcher_swapped = True
+        if surface != "windows":
+            launcher_path.chmod(0o755)
+        result["_candidate_readiness"] = readiness
+    except Exception:
+        if launcher_swapped and launcher_path.exists():
+            launcher_path.unlink(missing_ok=True)
+        if backup_launcher.exists():
+            os.replace(backup_launcher, launcher_path)
+        if app_swapped and app_path.exists():
+            shutil.rmtree(app_path)
+        if backup_app.exists():
+            os.replace(backup_app, app_path)
+        raise
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+
+
+def _write_launcher(
+    surface: str,
+    launcher_path: Path,
+    *,
+    final_app_path: Path,
+    final_launcher_path: Path,
+    uv_bin: str,
+) -> None:
     launcher_path.parent.mkdir(parents=True, exist_ok=True)
     if surface == "windows":
-        app_value = _cmd_assignment_value(str(app_path))
-        uv_value = _cmd_assignment_value(resolved_uv_bin)
+        app_value = _cmd_assignment_value(str(final_app_path))
+        uv_value = _cmd_assignment_value(uv_bin)
         launcher_path.write_text(
             "@echo off\r\n"
             f"set \"M32_BRIDGE_APP_DIR={app_value}\"\r\n"
             f"set \"UV_BIN={uv_value}\"\r\n"
-            f"set \"M32_BRIDGE_LAUNCHER={_cmd_assignment_value(str(launcher_path))}\"\r\n"
+            f"set \"M32_BRIDGE_LAUNCHER={_cmd_assignment_value(str(final_launcher_path))}\"\r\n"
             "set \"M32_BRIDGE_UV_BIN=%UV_BIN%\"\r\n"
             "set \"PYTHONPATH=%M32_BRIDGE_APP_DIR%\\src;%PYTHONPATH%\"\r\n"
             "set \"UV_MANAGED_PYTHON=1\"\r\n"
@@ -729,9 +1332,9 @@ def _apply_user_local_install(surface: str, result: dict[str, Any], *, uv_bin: s
     else:
         launcher_path.write_text(
             "#!/bin/sh\n"
-            f"APP_DIR={shlex.quote(str(app_path))}\n"
-            f"UV_BIN={shlex.quote(resolved_uv_bin)}\n"
-            f"M32_BRIDGE_LAUNCHER={shlex.quote(str(launcher_path))}\n"
+            f"APP_DIR={shlex.quote(str(final_app_path))}\n"
+            f"UV_BIN={shlex.quote(uv_bin)}\n"
+            f"M32_BRIDGE_LAUNCHER={shlex.quote(str(final_launcher_path))}\n"
             "M32_BRIDGE_UV_BIN=\"$UV_BIN\"\n"
             "cd \"$APP_DIR\"\n"
             "PYTHONPATH=\"$APP_DIR/src${PYTHONPATH:+:$PYTHONPATH}\"\n"
@@ -945,7 +1548,7 @@ def _print_plain(surface: str, result: dict[str, Any], *, dry_run: bool, tty: bo
     print(f"surface: {surface}")
     print(f"mode: {'dry-run' if dry_run else 'apply'}")
     print(f"status: {result['status']}")
-    print(f"version: {result.get('version', VERSION)}")
+    print(f"version: {result.get('application_version') or result.get('version') or 'unknown'}")
     print(f"install_source: {result.get('install_source', 'local_checkout')}")
     print(f"install_root: {result.get('install_root')}")
     print(f"app_path: {result['app_path']}")
