@@ -432,13 +432,46 @@ def get_info_runtime(
     port: int | None,
     timeout: float = 0.5,
     probe_result: dict[str, Any] | None = None,
+    environ: dict[str, str] | None = None,
+    user_config_path: Path | None = None,
 ) -> dict[str, Any]:
+    resolution = None
+
     if host is None:
-        resolution = resolve_runtime_config(cli_args={}, environ={}, allow_project_local=False)
-        payload = no_console_host_output(resolution)
-        payload["scan_attempted"] = False
-        payload["guessed_host"] = None
-        return payload
+        runtime_environ = dict(
+            os.environ
+            if environ is None
+            else environ
+        )
+
+        resolution = resolve_runtime_config(
+            cli_args=_present_cli_args(
+                host=host,
+                port=port,
+            ),
+            environ=runtime_environ,
+            user_config_path=user_config_path,
+            allow_project_local=False,
+        )
+
+        if not resolution.effective_host:
+            payload = no_console_host_output(resolution)
+            payload["scan_attempted"] = False
+            payload["network_scan"] = "not_run"
+            payload["guessed_host"] = None
+            payload["source_by_field"] = dict(
+                resolution.source_by_field
+            )
+            payload["config_path"] = (
+                str(resolution.config_path)
+                if resolution.config_path
+                else None
+            )
+            return payload
+
+        host = resolution.effective_host
+        port = resolution.effective_port
+
     if port is None:
         port = 10023
     probe = probe_result or setup_info_probe(str(host).strip(), port, timeout=timeout)
@@ -455,7 +488,7 @@ def get_info_runtime(
         "latency_ms": probe.get("latency_ms"),
         "classification": "CONNECTED_UNVERIFIED" if connected else "unknown",
     }
-    return runtime_output(
+    payload = runtime_output(
         ok=bool(connected),
         status="CONNECTED" if connected else "NOT_CONNECTED",
         error_code=None if connected else "NOT_CONNECTED",
@@ -474,6 +507,20 @@ def get_info_runtime(
         hardware_verified=False,
         production_live_ready=False,
     )
+    payload["scan_attempted"] = False
+    payload["network_scan"] = "not_run"
+
+    if resolution is not None:
+        payload["source_by_field"] = dict(
+            resolution.source_by_field
+        )
+        payload["config_path"] = (
+            str(resolution.config_path)
+            if resolution.config_path
+            else None
+        )
+
+    return payload
 
 
 def doctor_runtime_command(
