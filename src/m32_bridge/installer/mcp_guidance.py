@@ -71,6 +71,7 @@ def render_mcp_guidance(
     client: str = "all",
     local_app_data: Path | str | None = None,
     version: str | None = None,
+    read_runtime_config: bool = True,
 ) -> dict[str, Any]:
     env = dict(os.environ if environ is None else environ)
     selected_client = client if client in {*CLIENT_IDS, "all"} else "all"
@@ -81,7 +82,29 @@ def render_mcp_guidance(
         else application_version(launcher["app_path"], environ=env)
     )
     runtime_config_path = (home / ".m32-bridge" / "runtime.yaml") if home is not None else default_user_config_path()
-    resolution = resolve_runtime_config(environ=env, user_config_path=runtime_config_path, allow_project_local=False)
+
+    if read_runtime_config:
+        resolution = resolve_runtime_config(
+            environ=env,
+            user_config_path=runtime_config_path,
+            allow_project_local=False,
+        )
+        configured_host = resolution.effective_host
+        configured_port = resolution.effective_port
+        console_configured: bool | None = bool(
+            resolution.effective_host
+        )
+        runtime_config_inspection = (
+            "configured"
+            if resolution.effective_host
+            else "not_configured"
+        )
+    else:
+        configured_host = None
+        configured_port = None
+        console_configured = None
+        runtime_config_inspection = "not_checked"
+
     warnings = _environment_override_warnings(env)
     profiles = _profiles(launcher["launcher_path"])
     clients = {profile.id: _profile_payload(profile, launcher["launcher_path"]) for profile in profiles}
@@ -103,9 +126,10 @@ def render_mcp_guidance(
         "args": list(ARGS),
         "runtime_config_path": str(runtime_config_path),
         "runtime_config_source": "~/.m32-bridge/runtime.yaml",
-        "console_configured": bool(resolution.effective_host),
-        "configured_host": resolution.effective_host,
-        "configured_port": resolution.effective_port,
+        "runtime_config_inspection": runtime_config_inspection,
+        "console_configured": console_configured,
+        "configured_host": configured_host,
+        "configured_port": configured_port,
         "environment_required": {},
         "environment_overrides_present": warnings,
         "environment_variables": "none required",
@@ -113,7 +137,7 @@ def render_mcp_guidance(
         "manual_copy_only": True,
         "manual_copy_wording": "Manual-copy only: paste the generated values into the MCP client yourself.",
         "embeds_host_port_by_default": False,
-        "reads_saved_user_config_by_default": True,
+        "reads_saved_user_config_by_default": read_runtime_config,
         "config_written": False,
         "app_opened": False,
         "no_auto_config_write": True,

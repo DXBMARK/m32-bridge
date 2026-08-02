@@ -19,7 +19,12 @@ def test_post_install_verification_guidance_lists_required_commands(tmp_path):
     assert result["ok"] is True
     assert result["status"] == "verification_guidance"
     assert result["version"]
-    assert result["install_source"] == "local_checkout"
+    assert result["install_metadata_status"] == "metadata_missing"
+    assert result["provenance_trusted"] is False
+    assert result["install_source"] == "not_available"
+    assert result["selection"] == "not_available"
+    assert result["release_tag"] == "not_available"
+    assert result["source_commit"] == "not_available"
     assert result["install_path"] == str(tmp_path / ".m32-bridge" / "app")
     assert result["launcher_path"] == str(tmp_path / ".local" / "bin" / "m32-bridge")
     assert result["next_commands"] == REQUIRED_COMMANDS

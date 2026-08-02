@@ -588,7 +588,34 @@ def perform_apply_install(
         )
 
     status = "already_current" if result["status"] in {"fresh_install", "repair", "update"} else result["status"]
-    mcp_guidance, lifecycle_guidance = _post_install_guidance(surface, result, status=status)
+    guidance_warning: str | None = None
+    try:
+        mcp_guidance, lifecycle_guidance = _post_install_guidance(
+            surface,
+            result,
+            status=status,
+        )
+    except Exception as exc:
+        guidance_warning = (
+            "Post-install guidance was deferred; "
+            "the installed application remains ready."
+        )
+        _best_effort_post_install_guidance_diagnostic(
+            result,
+            exc,
+        )
+        mcp_guidance = _deferred_mcp_guidance(
+            result,
+            warning=guidance_warning,
+        )
+        lifecycle_guidance = {
+            "ok": True,
+            "status": "LIFECYCLE_GUIDANCE_DEFERRED",
+            "result_status": status,
+            "network_scan": "not_run",
+            "console_probe": "not_run",
+            "osc_writes_sent": 0,
+        }
     public_result = _without_private_fields(result)
     public_result.pop("source_status", None)
     runtime_info = {
@@ -601,6 +628,7 @@ def perform_apply_install(
         "network_scan": "not_run",
         "console_probe": "not_run",
         "install_metadata_status": install_metadata_status,
+        "post_install_guidance_status": str(mcp_guidance.get("status") or "unknown"),
     }
     completed = {
         **public_result,
@@ -643,9 +671,18 @@ def perform_apply_install(
         "production_live_ready": False,
         "osc_writes_sent": 0,
     }
+    if guidance_warning:
+        completed["runtime_info"]["post_install_guidance_warning"] = guidance_warning
+        completed["recommendations"] = [
+            *list(completed.get("recommendations") or []),
+            guidance_warning,
+        ]
     if metadata_warning:
         completed["runtime_info"]["install_metadata_warning"] = metadata_warning
-        completed["recommendations"] = [*list(completed.get("recommendations") or []), metadata_warning]
+        completed["recommendations"] = [
+            *list(completed.get("recommendations") or []),
+            metadata_warning,
+        ]
     return completed
 
 
@@ -978,6 +1015,58 @@ def _best_effort_metadata_diagnostic(result: dict[str, Any], exc: BaseException)
         return
 
 
+def _best_effort_post_install_guidance_diagnostic(
+    result: dict[str, Any],
+    exc: Exception,
+) -> None:
+    try:
+        _write_install_diagnostic_log(
+            _diagnostic_log_dir(result),
+            stdout="",
+            stderr=(
+                "post-install guidance "
+                f"{type(exc).__name__}: {exc}"
+            ),
+        )
+    except Exception:
+        return
+
+
+def _deferred_mcp_guidance(
+    result: dict[str, Any],
+    *,
+    warning: str,
+) -> dict[str, Any]:
+    launcher_path = str(result.get("launcher_path") or "")
+    return {
+        "ok": True,
+        "status": "MCP_GUIDANCE_DEFERRED",
+        "product": "X32-Bridge MCP",
+        "version": str(
+            result.get("target_version")
+            or result.get("application_version")
+            or VERSION
+        ),
+        "server_name": "x32-bridge-mcp",
+        "launcher_path": launcher_path,
+        "command": launcher_path,
+        "args": ["mcp-server"],
+        "runtime_config_inspection": "not_checked",
+        "console_configured": None,
+        "configured_host": None,
+        "configured_port": None,
+        "manual_copy_only": True,
+        "automatic_client_config_write": False,
+        "reads_saved_user_config_by_default": False,
+        "warning": warning,
+        "network_scan": False,
+        "console_probe": "not_run",
+        "osc_writes_sent": 0,
+        "hardware_verified": False,
+        "production_live_ready": False,
+    }
+
+
 def _post_install_guidance(surface: str, result: dict[str, Any], *, status: str) -> tuple[dict[str, Any], dict[str, Any]]:
     from .lifecycle import render_lifecycle_guidance
     from .mcp_guidance import render_mcp_guidance
@@ -988,6 +1077,12 @@ def _post_install_guidance(surface: str, result: dict[str, Any], *, status: str)
         os_family="windows" if surface == "windows" else None,
         home=None if surface == "windows" else launcher_root,
         local_app_data=launcher_root if surface == "windows" else None,
+        version=str(
+            result.get("target_version")
+            or result.get("application_version")
+            or VERSION
+        ),
+        read_runtime_config=False,
     )
     return mcp_guidance, render_lifecycle_guidance(surface=surface, install_status=status)
 

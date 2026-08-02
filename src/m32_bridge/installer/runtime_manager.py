@@ -173,15 +173,180 @@ def local_runtime_diagnostics(
 ) -> dict[str, Any]:
     env = dict(os.environ if environ is None else environ)
     runtime = inspect_runtime(environ=env)
-    app = Path(app_path).expanduser() if app_path else None
-    launcher = Path(launcher_path).expanduser() if launcher_path else None
+
+    app_value = (
+        app_path
+        if app_path not in {None, ""}
+        else env.get("M32_BRIDGE_APP_DIR")
+    )
+    launcher_value = (
+        launcher_path
+        if launcher_path not in {None, ""}
+        else env.get("M32_BRIDGE_LAUNCHER")
+    )
+
+    def resolved_path(value: str | None) -> Path | None:
+        if value in {None, ""}:
+            return None
+        return Path(str(value)).expanduser().resolve(strict=False)
+
+    app = resolved_path(app_value)
+    launcher = resolved_path(launcher_value)
+
+    app_available = bool(
+        app is not None
+        and app.is_dir()
+    )
+    launcher_available = bool(
+        launcher is not None
+        and launcher.is_file()
+    )
+    launcher_executable = bool(
+        launcher_available
+        and launcher is not None
+        and os.access(launcher, os.X_OK)
+    )
+
+    path_entries = {
+        str(
+            Path(entry)
+            .expanduser()
+            .resolve(strict=False)
+        )
+        for entry in env.get("PATH", "").split(os.pathsep)
+        if entry
+    }
+
+    path_visibility = bool(
+        launcher is not None
+        and str(launcher.parent.resolve(strict=False))
+        in path_entries
+    )
+
+    runtime_ready = bool(
+        runtime.get("uv_detected")
+        and runtime.get("managed_python_detected")
+    )
+
+    installed_runtime = (
+        str(
+            env.get("M32_BRIDGE_INSTALLED_RUNTIME")
+            or ""
+        ).strip()
+        == "1"
+    )
+    installation_expected = installed_runtime
+
+    installation_paths_ready = bool(
+        app_available
+        and launcher_available
+        and launcher_executable
+    )
+
+    installation_ready = bool(
+        not installation_expected
+        or installation_paths_ready
+    )
+
+    ready = bool(
+        runtime_ready
+        and installation_ready
+    )
+
+    required_actions: list[str] = []
+
+    if not runtime.get("uv_detected"):
+        required_actions.append(
+            "Install or restore the approved user-local uv runtime."
+        )
+
+    if not runtime.get("managed_python_detected"):
+        required_actions.append(
+            "Install or restore managed CPython 3.13."
+        )
+
+    if installation_expected:
+        if not app_available:
+            required_actions.append(
+                "Restore the installed application directory."
+            )
+
+        if not launcher_available:
+            required_actions.append(
+                "Restore the m32-bridge launcher file."
+            )
+        elif not launcher_executable:
+            required_actions.append(
+                "Restore executable permission on the launcher."
+            )
+
     runtime.update(
         {
-            "status": "ok" if runtime["uv_detected"] and runtime["managed_python_detected"] else "action_required",
-            "app_files": "available" if app and app.exists() else "not_found",
-            "launcher_file": "available" if launcher and launcher.exists() else "not_found",
-            "launcher_executable": bool(launcher and launcher.exists() and os.access(launcher, os.X_OK)),
-            "path_visibility": bool(launcher and str(launcher.parent) in env.get("PATH", "").split(os.pathsep)),
+            "ok": ready,
+            "healthy": ready,
+            "status": (
+                "ok"
+                if ready
+                else "action_required"
+            ),
+            "error_code": (
+                None
+                if ready
+                else "RUNTIME_ACTION_REQUIRED"
+            ),
+            "message": (
+                (
+                    "Local runtime and installation paths are healthy."
+                    if installation_expected
+                    else "Local source-checkout runtime is healthy."
+                )
+                if ready
+                else
+                "Local runtime or installation paths require repair."
+            ),
+            "app_path": (
+                str(app)
+                if app is not None
+                else None
+            ),
+            "launcher_path": (
+                str(launcher)
+                if launcher is not None
+                else None
+            ),
+            "app_files": (
+                "available"
+                if app_available
+                else "not_found"
+            ),
+            "app_path_status": (
+                "available"
+                if app_available
+                else "not_found"
+            ),
+            "launcher_file": (
+                "available"
+                if launcher_available
+                else "not_found"
+            ),
+            "launcher_path_status": (
+                "available"
+                if launcher_available
+                else "not_found"
+            ),
+            "launcher_executable": launcher_executable,
+            "path_visibility": path_visibility,
+            "runtime_ready": runtime_ready,
+            "execution_context": (
+                "installed_runtime"
+                if installation_expected
+                else "source_checkout"
+            ),
+            "installed_runtime": installed_runtime,
+            "installation_expected": installation_expected,
+            "installation_paths_ready": installation_paths_ready,
+            "installation_ready": installation_ready,
+            "required_actions": required_actions,
             "console_probe": "not_run",
             "network_scan": "not_run",
             "osc_writes_sent": 0,

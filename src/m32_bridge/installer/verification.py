@@ -7,6 +7,10 @@ from typing import Any, Mapping
 
 from m32_bridge.config.runtime import resolve_runtime_config
 from m32_bridge.installer.application_version import application_version
+from m32_bridge.installer.install_metadata import (
+    install_metadata_path,
+    read_install_metadata,
+)
 from m32_bridge.installer.ide_detector import detect_ide_clients
 from m32_bridge.installer.mcp_guidance import render_mcp_guidance
 from m32_bridge.installer.paths import default_install_location
@@ -40,7 +44,20 @@ def render_post_install_verification(
     env = dict(environ or {})
     target = _target_from_environment(env)
     location = default_install_location(target, home=home, local_app_data=local_app_data or env.get("LOCALAPPDATA"))
-    resolved_version = application_version(location.app_path, environ=env)
+    resolved_version = application_version(
+        location.app_path,
+        environ=env,
+    )
+    metadata_result = read_install_metadata(
+        install_metadata_path(
+            app_path=location.app_path,
+        )
+    )
+    provenance = _installed_provenance(
+        metadata_result,
+        app_path=location.app_path,
+        resolved_version=resolved_version,
+    )
     runtime = detect_uv_status()
     runtime_info = inspect_runtime(environ=env)
     uv_detected = runtime.uv_status in {"present", "installed_user_local"}
@@ -54,15 +71,25 @@ def render_post_install_verification(
         home=home,
         os_family=target.os_family,
         local_app_data=local_app_data,
-        version=resolved_version,
+        version=provenance["application_version"],
     )
 
     return {
         "ok": True,
         "status": "verification_guidance",
         "structured": True,
-        "version": resolved_version,
-        "install_source": "local_checkout",
+        "version": provenance["application_version"],
+        "application_version": provenance["application_version"],
+        "application_version_source": provenance["application_version_source"],
+        "install_metadata_status": provenance["install_metadata_status"],
+        "install_metadata_path": provenance["install_metadata_path"],
+        "provenance_trusted": provenance["provenance_trusted"],
+        "install_source": provenance["install_source"],
+        "selection": provenance["selection"],
+        "release_channel": provenance["release_channel"],
+        "release_tag": provenance["release_tag"],
+        "source_ref": provenance["source_ref"],
+        "source_commit": provenance["source_commit"],
         "platform": target.output_platform,
         "os_family": target.os_family,
         "wsl_distribution": target.wsl_distribution,
@@ -108,6 +135,113 @@ def render_post_install_verification(
         "osc_writes_sent": 0,
         "hardware_verified": False,
         "production_live_ready": False,
+    }
+
+
+def _installed_provenance(
+    metadata_result: Mapping[str, Any],
+    *,
+    app_path: Path,
+    resolved_version: str,
+) -> dict[str, Any]:
+    metadata_status = str(
+        metadata_result.get("status")
+        or "metadata_invalid"
+    )
+    metadata_file = str(
+        metadata_result.get("path")
+        or install_metadata_path(app_path=app_path)
+    )
+
+    raw_data = metadata_result.get("data")
+    data = (
+        dict(raw_data)
+        if isinstance(raw_data, Mapping)
+        else {}
+    )
+
+    trusted = metadata_status == "metadata_valid"
+
+    if trusted:
+        recorded_app_path = str(
+            data.get("app_path")
+            or ""
+        )
+        recorded_version = str(
+            data.get("application_version")
+            or ""
+        )
+
+        try:
+            app_path_matches = bool(
+                recorded_app_path
+                and Path(recorded_app_path)
+                .expanduser()
+                .resolve(strict=False)
+                == app_path.expanduser().resolve(strict=False)
+            )
+        except (OSError, ValueError):
+            app_path_matches = False
+
+        version_matches = (
+            recorded_version == resolved_version
+        )
+
+        if not app_path_matches or not version_matches:
+            metadata_status = "metadata_stale"
+            trusted = False
+
+    if not trusted:
+        return {
+            "install_metadata_status": metadata_status,
+            "install_metadata_path": metadata_file,
+            "provenance_trusted": False,
+            "application_version": resolved_version,
+            "application_version_source": (
+                "installed_pyproject"
+            ),
+            "install_source": "not_available",
+            "selection": "not_available",
+            "release_channel": "not_available",
+            "release_tag": "not_available",
+            "source_ref": "not_available",
+            "source_commit": "not_available",
+        }
+
+    return {
+        "install_metadata_status": "metadata_valid",
+        "install_metadata_path": metadata_file,
+        "provenance_trusted": True,
+        "application_version": str(
+            data["application_version"]
+        ),
+        "application_version_source": str(
+            data.get("application_version_source")
+            or "install_metadata"
+        ),
+        "install_source": str(
+            data["install_source"]
+        ),
+        "selection": str(
+            data.get("selection")
+            or "not_available"
+        ),
+        "release_channel": str(
+            data.get("release_channel")
+            or "not_available"
+        ),
+        "release_tag": str(
+            data.get("release_tag")
+            or "not_available"
+        ),
+        "source_ref": str(
+            data.get("source_ref")
+            or "not_available"
+        ),
+        "source_commit": str(
+            data.get("source_commit")
+            or "not_available"
+        ),
     }
 
 
