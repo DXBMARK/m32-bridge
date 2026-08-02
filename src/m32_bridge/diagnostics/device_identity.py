@@ -91,7 +91,7 @@ def classify_device(
             exception_type=exception_type,
             response_address=response_address,
             connected=False,
-            classification="CONNECTED_UNVERIFIED",
+            classification=None,
             osc_writes_sent=0,
             hardware_verified=False,
             production_live_ready=False,

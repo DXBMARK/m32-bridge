@@ -135,10 +135,12 @@ def inspect_runtime(
             if version_rc == 0 and version_text.startswith(f"Python {APPROVED_PYTHON_MINOR}."):
                 managed_path = candidate
                 managed_version = version_text.removeprefix("Python ").strip()
-    system_path = find("python3") or find("python")
+    host_env = _host_python_environment(env, managed_path)
+    host_find = _finder_for_environ(host_env)
+    system_path = host_find("python3") or host_find("python")
     system_version: str | None = None
     if system_path:
-        version_text, version_rc = _run_capture([system_path, "--version"], environ=env)
+        version_text, version_rc = _run_capture([system_path, "--version"], environ=host_env)
         if version_rc == 0:
             system_version = version_text.removeprefix("Python ").strip()
     return {
@@ -212,7 +214,7 @@ def platform_information(
         "architecture": architecture,
         "shell": shell,
         "wsl": "not_applicable",
-        "container_hint": container_hint or _container_hint(),
+        "container_hint": container_hint or _container_hint(environ=env),
     }
     lowered = system_name.lower()
     if lowered == "darwin":
@@ -332,6 +334,64 @@ def _download_to_file(url: str, target: Path) -> None:
             shutil.copyfileobj(response, output)
 
 
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _host_python_environment(
+    environ: Mapping[str, str],
+    managed_path: str | None,
+) -> dict[str, str]:
+    """Return an environment whose PATH excludes the managed application venv."""
+    env = dict(environ)
+    excluded_roots: list[Path] = []
+
+    if managed_path:
+        excluded_roots.append(Path(managed_path).expanduser().parent)
+
+    virtual_env = env.get("VIRTUAL_ENV")
+    if virtual_env:
+        virtual_root = Path(virtual_env).expanduser()
+        excluded_roots.extend(
+            (
+                virtual_root,
+                virtual_root / "bin",
+                virtual_root / "Scripts",
+            )
+        )
+
+    app_dir = env.get("M32_BRIDGE_APP_DIR")
+    if app_dir:
+        app_venv = Path(app_dir).expanduser() / ".venv"
+        excluded_roots.extend(
+            (
+                app_venv,
+                app_venv / "bin",
+                app_venv / "Scripts",
+            )
+        )
+
+    retained: list[str] = []
+    for raw_entry in env.get("PATH", "").split(os.pathsep):
+        if not raw_entry:
+            continue
+        entry = Path(raw_entry).expanduser()
+        if ".venv" in {part.lower() for part in entry.parts}:
+            continue
+        if any(_path_is_within(entry, root) for root in excluded_roots):
+            continue
+        retained.append(raw_entry)
+
+    env["PATH"] = os.pathsep.join(retained)
+    env.pop("VIRTUAL_ENV", None)
+    env.pop("PYTHONHOME", None)
+    return env
+
+
 def _run_capture(argv: Sequence[str], *, environ: Mapping[str, str] | None = None) -> tuple[str, int]:
     try:
         completed = subprocess.run(
@@ -393,11 +453,64 @@ def _read_os_release(path: Path) -> dict[str, str]:
     return values
 
 
-def _container_hint() -> str:
-    if Path("/.dockerenv").exists():
-        return "possible_container"
+def _container_hint(
+    *,
+    environ: Mapping[str, str] | None = None,
+    systemd_container_path: Path = Path("/run/systemd/container"),
+    proc1_environ_path: Path = Path("/proc/1/environ"),
+    cgroup_path: Path = Path("/proc/1/cgroup"),
+    dockerenv_path: Path = Path("/.dockerenv"),
+) -> str:
+    env = dict(os.environ if environ is None else environ)
+
+    explicit = str(env.get("container") or "").strip().lower()
+    if explicit:
+        return explicit
+
     try:
-        cgroup = Path("/proc/1/cgroup").read_text(encoding="utf-8", errors="ignore").lower()
+        marker = systemd_container_path.read_text(
+            encoding="utf-8",
+            errors="ignore",
+        ).strip().lower()
     except OSError:
-        return "not_detected"
-    return "possible_container" if any(token in cgroup for token in ("docker", "containerd", "kubepods", "podman")) else "not_detected"
+        marker = ""
+    if marker:
+        return marker
+
+    try:
+        proc_environment = proc1_environ_path.read_text(
+            encoding="utf-8",
+            errors="ignore",
+        )
+    except OSError:
+        proc_environment = ""
+    for item in proc_environment.split("\0"):
+        if item.startswith("container="):
+            value = item.partition("=")[2].strip().lower()
+            if value:
+                return value
+
+    if dockerenv_path.exists():
+        return "docker"
+
+    try:
+        cgroup = cgroup_path.read_text(
+            encoding="utf-8",
+            errors="ignore",
+        ).lower()
+    except OSError:
+        cgroup = ""
+
+    indicators = (
+        ("lxc", "lxc"),
+        ("kubepods", "kubernetes"),
+        ("containerd", "containerd"),
+        ("docker", "docker"),
+        ("libpod", "podman"),
+        ("podman", "podman"),
+    )
+    for token, name in indicators:
+        if token in cgroup:
+            return name
+
+    return "not_detected"

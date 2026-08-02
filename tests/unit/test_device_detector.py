@@ -120,3 +120,30 @@ def test_detect_device_reports_hardware_candidate_without_acceptance_evidence():
     assert payload["production_live_ready"] is False
     assert payload["data"]["usb_evidence"]["usb_control_supported"] is False
     assert payload["osc_writes_sent"] == 0
+
+
+def test_disconnected_endpoint_has_no_connected_classification():
+    from m32_bridge.diagnostics.device_identity import classify_device
+
+    payload = classify_device(
+        configured_host="192.0.2.10",
+        configured_port=10023,
+        intended_target_type="unknown",
+        info_probe={
+            "udp_info_probe_result": "CONNECTION_TIMEOUT",
+            "connected": False,
+            "attempted_path": "/info",
+            "latency_ms": None,
+            "exception_type": "TimeoutError",
+            "osc_writes_sent": 0,
+        },
+    )
+
+    _validate_runtime_output(payload)
+    assert payload["status"] == "NOT_CONNECTED"
+    assert payload["error_code"] == "NOT_CONNECTED"
+    assert payload["connected"] is False
+    assert "classification" not in payload
+    assert payload["hardware_verified"] is False
+    assert payload["production_live_ready"] is False
+    assert payload["osc_writes_sent"] == 0

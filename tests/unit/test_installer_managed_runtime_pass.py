@@ -663,3 +663,107 @@ def test_verify_device_generic_info_response_is_not_hardware_evidence():
     assert payload["hardware_verified"] is False
     assert payload["production_live_ready"] is False
     assert payload["osc_writes_sent"] == 0
+
+
+def test_container_hint_detects_lxc_from_systemd_marker(tmp_path):
+    from m32_bridge.installer.runtime_manager import _container_hint
+
+    marker = tmp_path / "systemd-container"
+    marker.write_text("lxc\n", encoding="utf-8")
+    missing = tmp_path / "missing"
+
+    detected = _container_hint(
+        environ={},
+        systemd_container_path=marker,
+        proc1_environ_path=missing,
+        cgroup_path=missing,
+        dockerenv_path=missing,
+    )
+
+    assert detected == "lxc"
+
+
+def test_platform_information_surfaces_detected_container(monkeypatch, tmp_path):
+    observed: list[dict[str, str]] = []
+
+    def fake_container_hint(*, environ=None, **kwargs):
+        observed.append(dict(environ or {}))
+        return "lxc"
+
+    monkeypatch.setattr(
+        "m32_bridge.installer.runtime_manager._container_hint",
+        fake_container_hint,
+    )
+
+    info = platform_information(
+        system="Linux",
+        release="6.8.0",
+        machine="x86_64",
+        environ={"SHELL": "/bin/bash", "container": "lxc"},
+        os_release_path=tmp_path / "missing-os-release",
+        proc_version_text="Linux version 6.8.0",
+    )
+
+    assert info["container_hint"] == "lxc"
+    assert observed == [{"SHELL": "/bin/bash", "container": "lxc"}]
+
+
+def test_runtime_inspection_separates_managed_and_host_python(monkeypatch, tmp_path):
+    app_root = tmp_path / "app"
+    virtual_root = app_root / ".venv"
+    virtual_bin = virtual_root / "bin"
+    host_bin = tmp_path / "host-bin"
+    virtual_bin.mkdir(parents=True)
+    host_bin.mkdir()
+
+    uv_path = virtual_bin / "uv"
+    managed_python = virtual_bin / "python3"
+    host_python = host_bin / "python3"
+
+    env = {
+        "PATH": f"{virtual_bin}{os.pathsep}{host_bin}",
+        "VIRTUAL_ENV": str(virtual_root),
+        "M32_BRIDGE_APP_DIR": str(app_root),
+        "UV_MANAGED_PYTHON": "1",
+    }
+
+    def fake_which(name: str, *, path: str | None = None):
+        entries = str(path or "").split(os.pathsep)
+        if name == "uv" and str(virtual_bin) in entries:
+            return str(uv_path)
+        if name in {"python3", "python"}:
+            if str(virtual_bin) in entries:
+                return str(managed_python)
+            if str(host_bin) in entries:
+                return str(host_python)
+        return None
+
+    def fake_run_capture(argv, **kwargs):
+        executable = str(argv[0])
+        if executable == str(uv_path) and argv[-1] == "--version":
+            return "uv 0.12.1", 0
+        if executable == str(uv_path) and "find" in argv:
+            return str(managed_python), 0
+        if executable == str(managed_python):
+            return "Python 3.13.14", 0
+        if executable == str(host_python):
+            return "Python 3.8.2", 0
+        return "", 1
+
+    monkeypatch.setattr(
+        "m32_bridge.installer.runtime_manager.shutil.which",
+        fake_which,
+    )
+    monkeypatch.setattr(
+        "m32_bridge.installer.runtime_manager._run_capture",
+        fake_run_capture,
+    )
+
+    runtime = inspect_runtime(environ=env)
+
+    assert runtime["python_path"] == str(managed_python)
+    assert runtime["python_version"] == "3.13.14"
+    assert runtime["system_python_path"] == str(host_python)
+    assert runtime["system_python_version"] == "3.8.2"
+    assert runtime["system_python_path"] != runtime["python_path"]
+    assert runtime["system_python_used"] is False
