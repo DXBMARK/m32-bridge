@@ -1665,7 +1665,7 @@ def _setup_tooltip_lines(key: str) -> list[str]:
             "  The network address configured on the M32 console itself.",
             "  Do not enter this computer's IP address.",
             "  The installer does not scan or guess addresses.",
-            "  Example: 192.168.8.120",
+            "  Enter the console host name or IP address.",
             "  Press Enter to keep the current value.",
         ]
     if key == "port":

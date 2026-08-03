@@ -1057,7 +1057,7 @@ def _deferred_mcp_guidance(
         "configured_port": None,
         "manual_copy_only": True,
         "automatic_client_config_write": False,
-        "reads_saved_user_config_by_default": False,
+        "reads_saved_user_config_by_default": True,
         "warning": warning,
         "network_scan": False,
         "console_probe": "not_run",

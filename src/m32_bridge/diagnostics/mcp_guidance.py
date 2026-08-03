@@ -43,7 +43,7 @@ def build_mcp_launch_guidance(
             "manual_only": True,
             "env": {
                 "M32_CONSOLE_HOST": "<console-host>",
-                "M32_CONSOLE_PORT": "10023",
+                "M32_CONSOLE_PORT": "<console-port>",
             },
         }
     return guidance

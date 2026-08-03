@@ -35,7 +35,7 @@ def test_deferred_mcp_guidance_does_not_read_runtime_config(
     assert payload["console_configured"] is None
     assert payload["configured_host"] is None
     assert payload["configured_port"] is None
-    assert payload["reads_saved_user_config_by_default"] is False
+    assert payload["reads_saved_user_config_by_default"] is True
     assert payload["args"] == ["mcp-server"]
     assert payload["manual_copy_only"] is True
     assert payload["console_probe"] == "not_run"

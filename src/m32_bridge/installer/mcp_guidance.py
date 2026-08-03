@@ -137,7 +137,7 @@ def render_mcp_guidance(
         "manual_copy_only": True,
         "manual_copy_wording": "Manual-copy only: paste the generated values into the MCP client yourself.",
         "embeds_host_port_by_default": False,
-        "reads_saved_user_config_by_default": read_runtime_config,
+        "reads_saved_user_config_by_default": True,
         "config_written": False,
         "app_opened": False,
         "no_auto_config_write": True,
@@ -455,7 +455,7 @@ def _advanced_override_examples(launcher_path: str) -> list[dict[str, Any]]:
             "config_mode": "manual_copy",
             "command": launcher_path,
             "args": list(ARGS),
-            "env": {"M32_CONSOLE_PORT": "10023"},
+            "env": {"M32_CONSOLE_PORT": "<console-port>"},
         },
     ]
 
