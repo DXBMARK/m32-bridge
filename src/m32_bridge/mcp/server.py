@@ -16,6 +16,10 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
 from m32_bridge.config.logging import configure_logging
+from m32_bridge.config.runtime import (
+    default_user_config_path,
+    resolve_runtime_config,
+)
 from m32_bridge.osc.client import OscClient
 from m32_bridge.osc.transport import OscEndpointError, OscTimeoutError, OscTransport
 
@@ -48,16 +52,61 @@ class RuntimeContext:
     target: RuntimeTarget
 
     @classmethod
-    def from_env(cls, environ: dict[str, str] | None = None) -> "RuntimeContext":
-        env = environ if environ is not None else os.environ
-        config = _load_runtime_config(env)
-        target_config = config.get("target", {}) if isinstance(config.get("target"), dict) else {}
-        env_host = env.get("M32_CONSOLE_HOST")
-        env_port = env.get("M32_CONSOLE_PORT")
-        host = env_host or _string_or_none(target_config.get("osc_host"))
-        port = _int_or_none(env_port if env_port is not None else target_config.get("osc_port"))
-        target_kind = _string_or_none(target_config.get("kind")) or "fake_m32"
-        return cls(RuntimeTarget(host=host, port=port, target_kind=target_kind))
+    def from_env(
+        cls,
+        environ: dict[str, str] | None = None,
+    ) -> "RuntimeContext":
+        env = dict(
+            os.environ
+            if environ is None
+            else environ
+        )
+
+        explicit_config_text = _string_or_none(
+            env.get("M32_CONFIG")
+        )
+        config_path = (
+            Path(explicit_config_text).expanduser()
+            if explicit_config_text
+            else default_user_config_path()
+        )
+
+        resolution = resolve_runtime_config(
+            cli_args={},
+            environ=env,
+            user_config_path=config_path,
+            allow_project_local=False,
+        )
+
+        legacy_config = _load_explicit_m32_config(env)
+        legacy_target = (
+            legacy_config.get("target", {})
+            if isinstance(
+                legacy_config.get("target"),
+                dict,
+            )
+            else {}
+        )
+
+        target_kind = _string_or_none(
+            legacy_target.get("kind")
+        )
+
+        if target_kind is None:
+            target_kind = (
+                "hardware"
+                if resolution.effective_intended_target_type
+                == "hardware"
+                else "fake_m32"
+            )
+
+        return cls(
+            RuntimeTarget(
+                host=resolution.effective_host,
+                port=resolution.effective_port,
+                target_kind=target_kind,
+            )
+        )
 
     def client(self) -> OscClient | None:
         if not self.target.configured:
@@ -263,6 +312,9 @@ def _not_connected_result(reason: str, exc: Exception | None = None) -> dict[str
         "error_code": "NOT_CONNECTED",
         "reason": reason,
         "connection_lifecycle": "not_connected",
+        "attempted_path": "/info",
+        "udp_info_probe_result": "NOT_CONNECTED",
+        "connected": False,
         "hardware_verified": False,
         "write_operations": [],
         "osc_writes_sent": 0,
@@ -343,12 +395,25 @@ def _schema_for_annotation(annotation: Any) -> dict[str, Any]:
     return {}
 
 
-def _load_runtime_config(environ: dict[str, str]) -> dict[str, Any]:
-    config_path = Path(environ.get("M32_CONFIG", "config.example.yaml"))
-    try:
-        loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    except OSError:
+def _load_explicit_m32_config(
+    environ: dict[str, str],
+) -> dict[str, Any]:
+    config_text = _string_or_none(
+        environ.get("M32_CONFIG")
+    )
+
+    if config_text is None:
         return {}
+
+    config_path = Path(config_text).expanduser()
+
+    try:
+        loaded = yaml.safe_load(
+            config_path.read_text(encoding="utf-8")
+        )
+    except (OSError, yaml.YAMLError):
+        return {}
+
     return loaded if isinstance(loaded, dict) else {}
 
 

@@ -50,8 +50,14 @@ def console_status(client: OscClient) -> dict[str, Any]:
     }
 
 
-def m32_runtime_diagnostics() -> dict[str, Any]:
-    return runtime_diagnostics()
+def m32_runtime_diagnostics(
+    client: OscClient,
+) -> dict[str, Any]:
+    return runtime_diagnostics(
+        host=client.transport.host,
+        port=client.transport.port,
+        timeout=client.transport.timeout,
+    )
 
 
 def overview(client: OscClient) -> dict[str, Any]:
