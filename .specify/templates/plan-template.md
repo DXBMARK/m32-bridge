@@ -40,7 +40,27 @@
 
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
 
-[Gates determined based on constitution file]
+- Confirm console state authority, manual-change priority, and local stdio as
+  the source-of-truth control model.
+- Confirm the normal MCP surface stays typed and bounded, with raw OSC and
+  generic execution surfaces excluded from the normal tool set.
+- Confirm normal writes still require stored proposals, human confirmation,
+  server-owned runtime state, reconciliation, readback, audit, and rollback.
+- Confirm the model cannot control approval state, runtime mode, write locks,
+  hardware-verification state, snapshot truth, or maintenance authorization.
+- Confirm EMERGENCY remains no-AI-write and returns only to OBSERVE after
+  reconciliation.
+- Confirm MAINTENANCE and controlled R4 paths are only reachable through the
+  separate maintenance boundary and remain unavailable in LIVE.
+- Confirm the protocol registry uses the approved OSC reference and that every
+  writable parameter has source, type, range, readback, rollback, and evidence
+  metadata.
+- Confirm every registered MCP tool is fully implemented for its declared scope
+  or removed from the tools list; no placeholder or partial handler may pass
+  planning.
+- Confirm emulator/Fake M32 evidence never sets hardware_verified=true.
+- Confirm production_live_ready stays false until release, native platform,
+  published-asset, and physical hardware acceptance gates pass.
 
 ## Project Structure
 

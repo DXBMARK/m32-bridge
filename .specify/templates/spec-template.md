@@ -8,6 +8,13 @@
 
 **Input**: User description: "$ARGUMENTS"
 
+## Constitution Alignment
+
+If the feature touches console control, protocol behavior, hardware readiness,
+approval flows, maintenance actions, or release gating, include an explicit note
+here describing how it complies with the current constitution and which
+historical clauses it supersedes.
+
 ## User Scenarios & Testing *(mandatory)*
 
 <!--

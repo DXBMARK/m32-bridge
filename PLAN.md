@@ -10,6 +10,11 @@
 **Secondary AI host**: ChatGPT/Antigravity/Codex through remote MCP transport and Secure MCP Tunnel, when Developer Mode is available  
 **Document role**: Self-contained SpecKit implementation canvas and source of truth for the MVP
 
+> Governance note (2026-08-03): This canvas defines the normal MVP scope and the
+> R1-R3 proposal path. The owner-approved controlled R4 maintenance / break-glass
+> subsystem is a separate later feature boundary and MUST be implemented only via
+> Feature 004 Spec/Plan/Tasks, not through the normal MVP implementation path.
+
 ---
 
 ## 1. Executive Summary
@@ -89,6 +94,9 @@ Passing emulator tests proves the software's OSC and MCP behavior. It does **not
 - Automatic phantom-power enable.
 - Live sample-rate or clock-source changes.
 - SD-card formatting, console shutdown, or firmware operations through AI.
+- Controlled R4 maintenance / break-glass execution. That work is reserved for
+  the later Feature 004 governance track and remains outside the normal MVP
+  proposal path.
 
 ### 3.3 Post-MVP Roadmap
 
@@ -112,6 +120,9 @@ Passing emulator tests proves the software's OSC and MCP behavior. It does **not
 - Claude Desktop is the first operational MCP host; ChatGPT transport is optional and depends on Developer Mode being available to the user's account.
 - Venue/event channel dictionaries and protected-path rules will be supplied before event-specific recommendations are trusted.
 - The user remains present for every sensitive write and will not enable permanent automatic approval for write tools.
+- The owner-approved controlled maintenance boundary, including any future R4
+  break-glass execution, remains deferred until Feature 004 Spec/Plan/Tasks are
+  complete and must not be inferred from this canvas alone.
 
 #### Dependencies
 
@@ -129,7 +140,7 @@ The following `MUST` statements are implementation gates.
 
 1. **Console Authority** — Live console replies are the authoritative source of operational state; model memory is never authoritative.
 2. **Read Before Write** — Every write proposal must be based on a fresh read or snapshot revision.
-3. **No Raw AI OSC** — No generic `send_raw_osc`, `set_any_path`, or arbitrary address tool may be exposed to the model.
+3. **No Raw AI OSC** — No generic `send_raw_osc`, `set_any_path`, or arbitrary address tool may be exposed on the normal MCP surface. Controlled maintenance preparation may exist only under Feature 004; authorization and execution remain local CLI-only.
 4. **Proposal Separation** — Analysis/proposal and execution are separate MCP tools and separate user-visible actions.
 5. **Human Approval** — Sensitive writes require the MCP host's explicit tool confirmation. Write tools must never be configured as `Always Allow`.
 6. **Readback Verification** — Every successful write must be read back and compared using the console's real resolution/grid.
@@ -251,7 +262,7 @@ As an engineer, I want writes disabled during disconnection and state reconciled
 - **FR-034** Every write shall be read back with retry and bounded timeout.
 - **FR-035** A failed verification shall produce a failed transaction and targeted rollback when safe.
 - **FR-036** Headamp, routing, recall, bulk, and talkback configuration operations shall require `SOUNDCHECK` or an explicitly enabled high-risk policy plus snapshot.
-- **FR-037** Phantom enable, sample-rate/clock change, firmware, shutdown, and SD format shall remain blocked in MVP.
+- **FR-037** In the normal MVP proposal path, phantom enable, sample-rate/clock change, firmware, and SD format shall remain blocked. Feature 004 may define a separate controlled maintenance/break-glass boundary where authorization and execution are local CLI-only for these non-shutdown R4 actions. Console shutdown shall remain permanently prohibited in every path, including Feature 004, with no local CLI or maintenance boundary exception.
 - **FR-038** Physical/manual changes shall invalidate conflicting proposals.
 
 ### MCP and Host Integration
@@ -281,13 +292,13 @@ As an engineer, I want writes disabled during disconnection and state reconciled
 - **SC-004** `100%` of write attempts have an audit record, including rejected operations.
 - **SC-005** `100%` of successful writes have matching readback verification.
 - **SC-006** `OBSERVE` mode sends no state-changing OSC packets in integration tests.
-- **SC-007** Every blocked R4 path remains blocked under direct tool calls, malformed proposals, and model-supplied custom paths.
+- **SC-007** Normal MCP and R1-R3 paths block all R4 attempts under direct tool calls, malformed proposals, and model-supplied custom paths; maintenance attempts fail without an exact local permit.
 - **SC-008** A stale/disconnected state prevents all writes within `1 second` of detected heartbeat failure.
 - **SC-009** After the target returns, identity and critical state reconciliation complete before write unlock.
 - **SC-010** Proposal conflict tests send zero target writes after an external/manual state change.
 - **SC-011** The system correctly labels `emulator`, `hardware-unverified`, and `hardware-verified` in every status response.
 - **SC-012** Claude Desktop can list, call, and receive valid results from all MVP MCP tools.
-- **SC-013** The external X32 Emulator integration suite passes on at least the primary Windows development environment.
+- **SC-013** External emulator integration passes on at least one supported native development environment before emulator evidence is accepted; before release candidate approval, applicable emulator, runtime, installer, and MCP gates are represented in the native macOS, Windows, and Linux validation matrix.
 - **SC-014** The final hardware acceptance suite demonstrates live manual gain/fader change detection before the project claims hardware readiness.
 
 ---
@@ -296,7 +307,7 @@ As an engineer, I want writes disabled during disconnection and state reconciled
 
 | Area | Decision |
 |---|---|
-| Language | Python `3.12` |
+| Language | Python `>=3.11,<3.14` (project contract); installer-managed runtime is Python `3.13` |
 | Architecture | Local modular monolith |
 | MCP SDK | Official MCP Python SDK stable `1.x`, exact version pinned |
 | Primary transport | MCP `stdio` |
@@ -551,6 +562,7 @@ m32-ai-bridge/
 | `OFFLINE` | Snapshots/fixtures only | No console writes |
 | `OBSERVE` | Read, monitor, analyze | None |
 | `SOUNDCHECK` | Setup, diagnostics, approved configuration | R1–R3 by policy |
+| `MAINTENANCE` | Local operator-controlled break-glass state | Controlled R4 through local CLI permit flow only |
 | `LIVE` | Performance monitoring and small corrective actions | R1 and limited R2 only |
 | `EMERGENCY` | AI write-lock only: stop automation and cancel pending proposals | Block all AI console writes, AI mute, and AI rollback; return to OBSERVE only after reconciliation |
 
@@ -562,7 +574,8 @@ m32-ai-bridge/
 | R1 | Mute, small fader adjustment, label | Proposal + host confirmation unless explicitly pre-authorized |
 | R2 | Sends, EQ cut, dynamics, talkback momentary action | Proposal + host confirmation + bounds |
 | R3 | Headamp, routing, scene/cue/snippet recall, bulk | `SOUNDCHECK`, snapshot, explicit high-risk enable, host confirmation |
-| R4 | Phantom enable, sample-rate/clock change, firmware, shutdown, SD format | Blocked in MVP |
+| R4 | Phantom enable, sample-rate/clock change, firmware, SD format | Separate Feature 004 maintenance/break-glass boundary; never normal MCP execution |
+| Prohibited | Console shutdown | Permanently prohibited through AI and through the maintenance subsystem; no R4 boundary exception |
 
 ### 12.3 Default Bounds
 
@@ -823,7 +836,8 @@ The console is labeled `hardware-verified` only after these tests pass for its i
 | Fake gate | Manual change, failure injection, reconnect, conflict, and rollback pass deterministically. |
 | Emulator gate | External UDP read/write/readback and `/xremote` integration suite passes. |
 | MCP gate | Inspector plus Claude Desktop tools pass without protocol/log corruption. |
-| Safety gate | R4 paths blocked and no raw-path bypass found. |
+| Safety gate | Normal R1-R3 path blocks all R4 attempts and no raw-path bypass is found. |
+| Maintenance-permit gate | Maintenance/break-glass attempts fail without an exact local single-use permit bound to action digest and console identity. |
 | Hardware gate | Physical challenge and isolated safe-write suite pass. |
 
 ---
@@ -854,7 +868,7 @@ License gate:
 
 | Threat | Mitigation |
 |---|---|
-| Model calls dangerous tool | Minimal typed tool surface, risk policy, host confirmation, R4 block |
+| Model calls dangerous tool | Minimal typed normal MCP surface, risk policy, host confirmation, and separate local-CLI maintenance permit boundary for R4 |
 | Prompt injection requests raw OSC | No raw tool exists; server validates paths and actions |
 | UDP spoofing on console LAN | Dedicated private network, source endpoint checks, no untrusted clients |
 | Lost UDP write/reply | Readback, bounded retries, transaction status |
@@ -1164,15 +1178,16 @@ These inputs are intentionally deferred and do not block emulator/MCP developmen
 The MVP is complete only when:
 
 - SpecKit constitution, spec, plan, contracts, data model, tasks, and quickstart are consistent.
-- Python package runs on Windows and macOS.
+- Applicable clean runtime, installer, MCP, and release-asset validation pass on macOS, Windows, and Linux.
 - Fake M32 automated suites pass.
-- Patrick X32 Emulator integration suite passes on the primary development machine.
+- External emulator integration passes on at least one supported native environment, with applicable gates represented in the three-OS matrix before release candidate approval.
 - Claude Desktop can query current state and observe external/manual changes.
 - Full supported snapshot, routing, clock/sync, meters, and current-source RTA tools work.
 - Event preflight and recommendations are evidence-backed.
 - Measurement microphone role and restrictions are enforced.
 - Safe proposals, host confirmation, readback, conflict rejection, audit, and rollback pass.
-- R4 operations and raw OSC remain impossible through MCP.
+- R4 execution, authorization, permit creation, and permit submission remain impossible through MCP; typed preparation and read-only status may be exposed through Feature 004.
+- Console shutdown remains permanently prohibited through AI and through the maintenance subsystem.
 - Connection loss disables writes.
 - Hardware-only claims remain visibly unverified until the real console suite passes.
 - Hardware acceptance later passes before production/live deployment.
